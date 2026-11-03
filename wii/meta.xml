@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+  <name>nescore</name>
+  <coder>nescore contributors</coder>
+  <version>0.1</version>
+  <release_date>20261103</release_date>
+  <short_description>Cycle-accurate NES emulator</short_description>
+  <long_description>A cycle-accurate NES emulator built for the Wii.
+
+Put .nes files in sd:/nes/ (or usb:/nes/).
+Press HOME (or L+R on a GameCube pad) for the menu: savestates, run-ahead (lower input lag), scaling options.
+
+Supported mappers: 0, 1, 2, 3, 4, 7, 9, 10, 11, 66, 71.</long_description>
+  <ahb_access/>
+</app>
