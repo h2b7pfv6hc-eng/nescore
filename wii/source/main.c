@@ -845,7 +845,9 @@ int main(int argc, char **argv)
     }
     struct stat st;
     if (stat("sd:/nes", &st) == 0) strcpy(rom_dir, "sd:/nes");
+    else if (stat("sd:/roms/nes", &st) == 0) strcpy(rom_dir, "sd:/roms/nes");
     else if (stat("usb:/nes", &st) == 0) strcpy(rom_dir, "usb:/nes");
+    else if (stat("usb:/roms/nes", &st) == 0) strcpy(rom_dir, "usb:/roms/nes");
     else strcpy(rom_dir, "sd:");
     load_config();
 
