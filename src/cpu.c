@@ -38,7 +38,7 @@ void cpu_resched(nes_t *n)
     if (n->s.m.fine || FORCE_FINE) {
         at = now;
     } else {
-        /* first cycle N with 12(N+1) - PPU_OFFSET >= ev_master */
+        /* first cycle N with div*(N+1) - PPU_OFFSET >= ev_master */
         int64_t delta = (int64_t)(n->s.ppu.ev_master + PPU_OFFSET) - (int64_t)((c->cycles + 1) * CPU_DIV);
         uint32_t p = now;
         if (delta > 0) {
@@ -55,7 +55,7 @@ void cpu_resched(nes_t *n)
 INLINE void start_cycle(nes_t *n, int read)
 {
     cpu_t *c = CPU;
-    c->phase = read ? 5 : 7;
+    c->phase = read ? n->s.tm.ph_read : n->s.tm.ph_write;
     c->cycles++;
 #if APU_LOCKSTEP
     apu_sync(n);

@@ -84,6 +84,9 @@ nes_t *nes_create(int sample_rate)
     n->rate = sample_rate > 0 ? sample_rate : 48000;
     n->video_on = 1;
     n->audio_on = 1;
+    n->s.tm.cpu_div = 12;
+    n->s.tm.ppu_div = 4;
+    n->s.tm.pre = 261;
     apu_init_output(n);
     return n;
 }
@@ -118,9 +121,21 @@ int nes_load_rom(nes_t *n, const uint8_t *data, size_t size)
 
 int nes_mapper_number(const nes_t *n) { return n->mapper; }
 
+void nes_set_region(nes_t *n, int region) { n->region = region; }
+int nes_is_pal(const nes_t *n) { return n->s.tm.pal; }
+double nes_fps(const nes_t *n) { return n->s.tm.pal ? 50.0070 : 60.0988; }
+
 void nes_power(nes_t *n)
 {
     n->s.magic = STATE_MAGIC;
+    int pal = n->region == NES_REGION_PAL || (n->region == NES_REGION_AUTO && n->header_pal);
+    n->s.tm.pal = (uint8_t)pal;
+    n->s.tm.cpu_div = pal ? 16 : 12;
+    n->s.tm.ppu_div = pal ? 5 : 4;
+    n->s.tm.ph_read = pal ? 7 : 5;
+    n->s.tm.ph_write = pal ? 9 : 7;
+    n->s.tm.pre = pal ? 311 : 261;
+    nes_set_audio_rate(n, n->rate);
     memset(n->s.ram, 0, sizeof(n->s.ram));
     memset(n->s.vram, 0, sizeof(n->s.vram));
     if (n->chr_is_ram)

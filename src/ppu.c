@@ -291,7 +291,7 @@ static void sprite_fetch(nes_t *n, int d)
     uint8_t attr = p->oam2[i * 4 + 2], x = p->oam2[i * 4 + 3];
     int h = (p->ctrl & 0x20) ? 16 : 8;
     int row = (p->scanline - y) & (h - 1);
-    int valid = i < p->ev_cnt && p->scanline != 261;
+    int valid = i < p->ev_cnt && p->scanline != PRE_LINE;
     if (!valid) {
         tile = 0xFF;
         row = 0;
@@ -417,7 +417,7 @@ static void ppu_dot(nes_t *n)
     }
     if (d > 340) {
         d = 0;
-        if (++p->scanline > 261)
+        if (++p->scanline > PRE_LINE)
             p->scanline = 0;
         p->ev_pos = 1;
         if (p->scanline == 240) {
@@ -430,12 +430,12 @@ static void ppu_dot(nes_t *n)
 
     if (p->vdelay && --p->vdelay == 0) {
         p->v = p->vdelay_val;
-        if (!(p->render_en && (p->scanline < 240 || p->scanline == 261)))
+        if (!(p->render_en && (p->scanline < 240 || p->scanline == PRE_LINE)))
             bus(n, p->v);
     }
 
     int sl = p->scanline;
-    if (sl < 240 || sl == 261) {
+    if (sl < 240 || sl == PRE_LINE) {
         if (p->render_en) {
             if ((d >= 2 && d <= 257) || (d >= 322 && d <= 337)) {
                 p->shl <<= 1;
@@ -451,13 +451,13 @@ static void ppu_dot(nes_t *n)
                 inc_y(p);
             else if (d == 257)
                 p->v = (uint16_t)((p->v & ~0x041F) | (p->t & 0x041F));
-            else if (sl == 261 && d >= 280 && d <= 304)
+            else if (sl == PRE_LINE && d >= 280 && d <= 304)
                 p->v = (uint16_t)((p->v & ~0x7BE0) | (p->t & 0x7BE0));
             if (sl < 240 && d == 256)
                 eval_catchup(n, 256);
             if (d >= 257 && d <= 320) {
                 if (d == 257) {
-                    p->sp_cnt = (sl == 261) ? 0 : p->ev_cnt;
+                    p->sp_cnt = (sl == PRE_LINE) ? 0 : p->ev_cnt;
                     p->sp_s0 = p->ev_s0;
                 }
                 p->oamaddr = 0;
@@ -469,9 +469,9 @@ static void ppu_dot(nes_t *n)
         if (sl < 240 && d >= 1 && d <= 256)
             put_pixel(n, d);
         /* odd frames are one dot shorter when rendering (decided at dot 339) */
-        if (sl == 261 && d == 339)
-            p->skip_dot = (p->frame & 1) && p->render_en;
-        if (sl == 261 && d == 1) {
+        if (sl == PRE_LINE && d == 339)
+            p->skip_dot = !n->s.tm.pal && (p->frame & 1) && p->render_en;
+        if (sl == PRE_LINE && d == 1) {
             p->status &= 0x1F;
             update_nmi(n);
             p->warmup = 0;
@@ -689,10 +689,10 @@ static void sprite_slot(nes_t *n)
         p->shl <<= 1; p->shh <<= 1; p->sal <<= 1; p->sah <<= 1;
         reload_shifters(p);
         p->v = (uint16_t)((p->v & ~0x041F) | (p->t & 0x041F));
-        p->sp_cnt = (p->scanline == 261) ? 0 : p->ev_cnt;
+        p->sp_cnt = (p->scanline == PRE_LINE) ? 0 : p->ev_cnt;
         p->sp_s0 = p->ev_s0;
     }
-    if (p->scanline == 261 && d0 + 7 >= 280 && d0 <= 304)
+    if (p->scanline == PRE_LINE && d0 + 7 >= 280 && d0 <= 304)
         p->v = (uint16_t)((p->v & ~0x7BE0) | (p->t & 0x7BE0));
     p->oamaddr = 0;
     uint64_t dots0 = p->dots;
@@ -733,16 +733,16 @@ void ppu_run(nes_t *n, uint64_t target)
     while (p->master + PPU_DIV <= target) {
         if (FASTPATH && p->scanline < 240 && p->dot < 255 && p->render_en &&
             (p->mask & 0x18) && !p->vdelay && p->master + 2 * PPU_DIV <= target) {
-            uint64_t avail = (target - p->master) / PPU_DIV;
+            uint64_t avail = (uint32_t)((target - p->master) > 0x7FFFFFFF ? 0x7FFFFFFF : (target - p->master)) / (uint32_t)PPU_DIV;
             int last = p->dot + (int)(avail > 255 ? 255 : avail);
             if (last > 255) last = 255;
             render_span(n, last);
             continue;
         }
-        if (FASTPATH2 && (p->scanline < 240 || p->scanline == 261) && p->dot >= 320 && p->dot < 338 &&
+        if (FASTPATH2 && (p->scanline < 240 || p->scanline == PRE_LINE) && p->dot >= 320 && p->dot < 338 &&
             p->render_en && (p->mask & 0x18) && !p->vdelay && p->master + 2 * PPU_DIV <= target) {
-            uint64_t avail = (target - p->master) / PPU_DIV;
-            int cap = p->scanline == 261 ? 338 : 340;
+            uint64_t avail = (uint32_t)((target - p->master) > 0x7FFFFFFF ? 0x7FFFFFFF : (target - p->master)) / (uint32_t)PPU_DIV;
+            int cap = p->scanline == PRE_LINE ? 338 : 340;
             int last = p->dot + (int)(avail > 40 ? 40 : avail);
             if (last > cap) last = cap;
             if (last > p->dot) {
@@ -750,7 +750,7 @@ void ppu_run(nes_t *n, uint64_t target)
                 continue;
             }
         }
-        if (FASTPATH2 && (p->scanline < 240 || p->scanline == 261) && (p->dot & 7) == 0 &&
+        if (FASTPATH2 && (p->scanline < 240 || p->scanline == PRE_LINE) && (p->dot & 7) == 0 &&
             p->dot >= 256 && p->dot <= 312 && p->render_en && (p->mask & 0x18) && !p->vdelay &&
             p->master + 8 * PPU_DIV <= target) {
             sprite_slot(n);
@@ -759,10 +759,10 @@ void ppu_run(nes_t *n, uint64_t target)
         /* Idle stretch of vertical blank: nothing observable happens until
          * the pre-render line, so jump ahead in one step. */
         int sl = p->scanline;
-        if (sl >= 241 && sl <= 260 && !p->vdelay && !(sl == 241 && p->dot == 0)) {
-            uint64_t avail = (target - p->master) / PPU_DIV;
+        if (sl >= 241 && sl < PRE_LINE && !p->vdelay && !(sl == 241 && p->dot == 0)) {
+            uint64_t avail = (uint32_t)((target - p->master) > 0x7FFFFFFF ? 0x7FFFFFFF : (target - p->master)) / (uint32_t)PPU_DIV;
             uint32_t pos = (uint32_t)sl * 341 + p->dot;
-            uint32_t end = sl == 240 ? 241 * 341 : 260 * 341 + 340;
+            uint32_t end = (uint32_t)(PRE_LINE - 1) * 341 + 340;
             if (pos < end) {
                 uint64_t k = end - pos;
                 if (k > avail) k = avail;
@@ -779,14 +779,14 @@ void ppu_run(nes_t *n, uint64_t target)
         ppu_dot(n);
     }
     /* next point the CPU must sync at: frame end (240,0), VBlank set
-     * (241,1) or VBlank clear (261,1). One dot early, to be safe across
+     * (241,1) or VBlank clear (pre-render line, dot 1). One dot early, to be safe across
      * the odd-frame skipped dot. */
     uint32_t pos = (uint32_t)p->scanline * 341 + p->dot;
     uint32_t ev;
     if (pos < 240 * 341) ev = 240 * 341;
     else if (pos < 241 * 341 + 1) ev = 241 * 341 + 1;
-    else if (pos < 261 * 341 + 1) ev = 261 * 341 + 1;
-    else ev = 262 * 341 + 240 * 341;
+    else if (pos < (uint32_t)PRE_LINE * 341 + 1) ev = (uint32_t)PRE_LINE * 341 + 1;
+    else ev = (uint32_t)(PRE_LINE + 1) * 341 + 240 * 341;
     uint64_t ahead = ev - pos - 1;
     if (n->s.m.safe_until != UINT64_MAX) {
         uint64_t lim = n->s.m.safe_until > p->dots ? n->s.m.safe_until - p->dots : 0;
@@ -815,15 +815,16 @@ static void latch_set(ppu_t *p, uint8_t v, uint8_t mask)
             p->latch_frame[b] = (uint32_t)p->frame;
 }
 
-INLINE int rendering(ppu_t *p)
+INLINE int rendering(nes_t *n)
 {
-    return p->render_en && (p->scanline < 240 || p->scanline == 261);
+    ppu_t *p = PPU;
+    return p->render_en && (p->scanline < 240 || p->scanline == PRE_LINE);
 }
 
 static void inc_v_after_access(nes_t *n)
 {
     ppu_t *p = PPU;
-    if (rendering(p)) {
+    if (rendering(n)) {
         inc_x(p);
         inc_y(p);
     } else {
@@ -914,7 +915,7 @@ void ppu_write_reg(nes_t *n, uint16_t a, uint8_t v)
         p->oamaddr = v;
         break;
     case 4:
-        if (rendering(p)) {
+        if (rendering(n)) {
             p->oamaddr = (uint8_t)(p->oamaddr + 4);
         } else {
             if ((p->oamaddr & 3) == 2)

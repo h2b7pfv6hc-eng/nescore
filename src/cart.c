@@ -419,6 +419,9 @@ int cart_load(nes_t *n, const uint8_t *d, size_t size)
     n->battery = (d[6] >> 1) & 1;
     n->four_screen = (d[6] >> 3) & 1;
     n->vertical = d[6] & 1;
+    /* NES 2.0: byte 12 bits 0-1 (1 = PAL); iNES: byte 9 bit 0 */
+    n->header_pal = nes2 ? ((d[12] & 3) == 1)
+                         : ((d[9] & 1) && !d[11] && !d[12] && !d[13] && !d[14] && !d[15]);
 
     n->map_write = NULL;
     n->map_bus = NULL;

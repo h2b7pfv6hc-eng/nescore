@@ -43,6 +43,16 @@ int nes_load_rom(nes_t *n, const uint8_t *data, size_t size);
 int nes_mapper_number(const nes_t *n);
 const char *nes_error_string(int err);
 
+enum { NES_REGION_AUTO = 0, NES_REGION_NTSC = 1, NES_REGION_PAL = 2 };
+
+/* Choose NTSC or PAL timing (AUTO follows the ROM header). Takes effect at
+ * the next power-on; nes_load_rom() powers on, so call this before it. */
+void nes_set_region(nes_t *n, int region);
+/* 1 if the running machine is PAL, 0 for NTSC. */
+int nes_is_pal(const nes_t *n);
+/* Frames per second of the emulated console (60.0988 or 50.0070). */
+double nes_fps(const nes_t *n);
+
 void nes_power(nes_t *n);
 void nes_reset(nes_t *n);
 

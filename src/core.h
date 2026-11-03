@@ -17,11 +17,13 @@
 #define NOINLINE
 #endif
 
-/* NTSC timing in master clocks (21.477272 MHz). */
-#define CPU_DIV 12
-#define PPU_DIV 4
+/* Region timing in master clocks: NTSC 21.477 MHz (CPU /12, PPU /4),
+ * PAL 26.602 MHz (CPU /16, PPU /5, 312 lines). Stored in the state. */
+#define CPU_DIV (n->s.tm.cpu_div)
+#define PPU_DIV (n->s.tm.ppu_div)
 #define PPU_OFFSET 1
-#define CPU_HZ 1789773.0
+#define CPU_HZ (n->s.tm.pal ? 1662607.0 : 1789773.0)
+#define PRE_LINE (n->s.tm.pre)
 
 enum { IRQ_FRAME = 1, IRQ_DMC = 2, IRQ_MAPPER = 4 };
 enum { FC = 0x01, FZ = 0x02, FI = 0x04, FD = 0x08, FB = 0x10, FU = 0x20, FV = 0x40, FN = 0x80 };
@@ -153,7 +155,14 @@ typedef struct {
 } mapper_t;
 
 typedef struct {
+    uint8_t pal;          /* 0 = NTSC (2C02), 1 = PAL (2C07) */
+    uint8_t cpu_div, ppu_div, ph_read, ph_write;
+    int16_t pre;          /* pre-render scanline: 261 NTSC, 311 PAL */
+} timing_t;
+
+typedef struct {
     uint32_t magic;
+    timing_t tm;
     cpu_t cpu;
     ppu_t ppu;
     apu_t apu;
@@ -181,6 +190,8 @@ struct nes {
     int chr_is_ram;
     int mapper, submapper;
     int battery, four_screen, vertical;
+    int header_pal;       /* the ROM header says PAL */
+    int region;           /* NES_REGION_* requested by the frontend */
     void (*map_write)(nes_t *n, uint16_t a, uint8_t v);
     void (*map_bus)(nes_t *n, uint16_t a);
     void (*map_reset)(nes_t *n);

@@ -52,52 +52,77 @@ static struct {
     int runahead;    /* 0..2 frames */
     int smooth;      /* bilinear filtering */
     int crop;        /* hide the top/bottom 8 lines like a CRT */
-    int stretch;     /* fill 4:3 instead of 8:7 pixel aspect */
-} cfg = {0, 0, 1, 0};
+    int stretch;     /* 0 = 8:7, 1 = 4:3 stretch, 2 = sharp 2x */
+    int region;      /* 0 auto (file name / header), 1 NTSC, 2 PAL */
+} cfg = {0, 0, 1, 2, 0};
 
-static void video_init(void)
+/* Output modes: NTSC games are shown at 60 Hz, PAL games at 50 Hz (on a
+ * PAL console), so every game runs at its own speed, locked to the TV. */
+static GXRModeObj *mode60, *mode50;
+static float scr_w = 640, scr_h = 480;
+static double display_hz = 59.94;
+
+static void video_apply(GXRModeObj *m)
 {
-    VIDEO_Init();
-    rmode = VIDEO_GetPreferredMode(NULL);
-    /* NES games run at 60 Hz: on a 50 Hz PAL setting, switch to PAL60
-     * (EuRGB60) so games run at full speed with smooth scrolling. */
-    if ((rmode->viTVMode >> 2) == VI_PAL)
-        rmode = &TVEurgb60Hz480IntDf;
-    widescreen = CONF_GetAspectRatio() == CONF_ASPECT_16_9;
-    if (widescreen)
-        rmode->viWidth = 678;
-    else
-        rmode->viWidth = 672;
-    rmode->viXOrigin = (VI_MAX_WIDTH_NTSC - rmode->viWidth) / 2;
-
-    xfb[0] = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
-    xfb[1] = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
+    rmode = m;
+    /* keep viWidth == fbWidth: any other value makes the video interface
+     * rescale every line horizontally, which blurs the pixels */
+    display_hz = ((rmode->viTVMode >> 2) == VI_PAL) ? 50.0 : 59.94;
     VIDEO_Configure(rmode);
     VIDEO_ClearFrameBuffer(rmode, xfb[0], COLOR_BLACK);
     VIDEO_ClearFrameBuffer(rmode, xfb[1], COLOR_BLACK);
-    VIDEO_SetNextFramebuffer(xfb[0]);
-    VIDEO_SetBlack(false);
+    VIDEO_SetNextFramebuffer(xfb[xfb_idx]);
     VIDEO_Flush();
     VIDEO_WaitVSync();
     if (rmode->viTVMode & VI_NON_INTERLACE)
         VIDEO_WaitVSync();
-
-    gp_fifo = memalign(32, FIFO_SIZE);
-    memset(gp_fifo, 0, FIFO_SIZE);
-    GX_Init(gp_fifo, FIFO_SIZE);
-
-    GXColor black = {0, 0, 0, 0xFF};
-    GX_SetCopyClear(black, 0x00FFFFFF);
+    if (!gp_fifo)
+        return;
     GX_SetViewport(0, 0, rmode->fbWidth, rmode->efbHeight, 0, 1);
     f32 yscale = GX_GetYScaleFactor(rmode->efbHeight, rmode->xfbHeight);
     u32 xfb_h = GX_SetDispCopyYScale(yscale);
     GX_SetScissor(0, 0, rmode->fbWidth, rmode->efbHeight);
     GX_SetDispCopySrc(0, 0, rmode->fbWidth, rmode->efbHeight);
     GX_SetDispCopyDst(rmode->fbWidth, xfb_h);
-    GX_SetCopyFilter(rmode->aa, rmode->sample_pattern, GX_TRUE, rmode->vfilter);
+    GX_SetCopyFilter(rmode->aa, rmode->sample_pattern, GX_FALSE, rmode->vfilter); /* no deflicker blur */
     GX_SetFieldMode(rmode->field_rendering,
                     (rmode->viHeight == 2 * rmode->xfbHeight) ? GX_ENABLE : GX_DISABLE);
     GX_SetPixelFmt(rmode->aa ? GX_PF_RGB565_Z16 : GX_PF_RGB8_Z24, GX_ZC_LINEAR);
+    /* draw in real framebuffer pixels (640x480, or 640x528 for PAL) */
+    scr_w = rmode->fbWidth;
+    scr_h = rmode->efbHeight;
+    Mtx44 proj;
+    guOrtho(proj, 0, scr_h, 0, scr_w, 0, 1);
+    GX_LoadProjectionMtx(proj, GX_ORTHOGRAPHIC);
+}
+
+static void video_init(void)
+{
+    VIDEO_Init();
+    GXRModeObj *pref = VIDEO_GetPreferredMode(NULL);
+    int fmt = pref->viTVMode >> 2;
+    int console_pal = (fmt == VI_PAL || fmt == VI_EURGB60);
+    int progressive = (pref->viTVMode & 3) == VI_PROGRESSIVE;
+    if (console_pal) {
+        mode60 = progressive ? &TVEurgb60Hz480Prog : &TVEurgb60Hz480IntDf;
+        mode50 = &TVPal528IntDf;
+    } else {
+        mode60 = pref;
+        mode50 = pref; /* NTSC consoles cannot output 50 Hz */
+    }
+    widescreen = CONF_GetAspectRatio() == CONF_ASPECT_16_9;
+
+    /* framebuffers big enough for every mode we may switch to */
+    xfb[0] = MEM_K0_TO_K1(SYS_AllocateFramebuffer(&TVPal576IntDfScale));
+    xfb[1] = MEM_K0_TO_K1(SYS_AllocateFramebuffer(&TVPal576IntDfScale));
+    gp_fifo = memalign(32, FIFO_SIZE);
+    memset(gp_fifo, 0, FIFO_SIZE);
+    GX_Init(gp_fifo, FIFO_SIZE);
+    GXColor black = {0, 0, 0, 0xFF};
+    GX_SetCopyClear(black, 0x00FFFFFF);
+    video_apply(mode60);
+    VIDEO_SetBlack(false);
+    VIDEO_Flush();
     GX_SetCullMode(GX_CULL_NONE);
     GX_SetDispCopyGamma(GX_GM_1_0);
     GX_CopyDisp(xfb[0], GX_TRUE);
@@ -118,9 +143,6 @@ static void video_init(void)
     GX_SetAlphaUpdate(GX_TRUE);
     GX_SetColorUpdate(GX_TRUE);
 
-    Mtx44 proj;
-    guOrtho(proj, 0, 480, 0, 640, 0, 1);
-    GX_LoadProjectionMtx(proj, GX_ORTHOGRAPHIC);
     Mtx mv;
     guMtxIdentity(mv);
     GX_LoadPosMtxImm(mv, GX_PNMTX0);
@@ -190,14 +212,23 @@ static void upload_game(const uint16_t *fb)
 static void draw_game(void)
 {
     tex_setup(&game_obj, game_tex, 256, 240, cfg.smooth);
-    /* NES pixels are 8:7; a 4:3 TV shows 256 px across ~ 585 of 640 units */
-    float w = cfg.stretch ? 640.f : 585.f;
-    if (widescreen)
+    /* Every NES line is exactly 2 framebuffer lines; nothing is scaled
+     * by a fractional amount vertically.
+     * Width: sharp = exactly 2 framebuffer pixels per NES pixel (512);
+     * 8:7 = the shape a real NES has on a 4:3 TV (585); 4:3 = full (640). */
+    float w = cfg.stretch == 2 ? 512.f : cfg.stretch == 1 ? 640.f : 585.f;
+    if (widescreen && cfg.stretch != 2)
         w *= 0.75f;
-    float x0 = (640.f - w) / 2.f;
-    float t0 = cfg.crop ? 8.f / 240.f : 0.f;
-    float t1 = cfg.crop ? 232.f / 240.f : 1.f;
-    draw_quad(&game_obj, x0, 0, x0 + w, 480, 0, t0, 1, t1);
+    float x0 = (float)(int)((scr_w - w) / 2.f);
+    float y0 = (float)(int)((scr_h - 480.f) / 2.f);
+    float t0 = 0.f, t1 = 1.f, top = y0, bottom = y0 + 480.f;
+    if (cfg.crop) { /* hide 8 lines top and bottom, keep the 2x scale */
+        t0 = 8.f / 240.f;
+        t1 = 232.f / 240.f;
+        top += 16.f;
+        bottom -= 16.f;
+    }
+    draw_quad(&game_obj, x0, top, x0 + w, bottom, 0, t0, 1, t1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -248,9 +279,10 @@ static void m_show(void)
     DCFlushRange(menu_tex, MENU_W * MENU_H * 2);
     GX_InvalidateTexAll();
     tex_setup(&menu_obj, menu_tex, MENU_W, MENU_H, 1);
-    float w = widescreen ? 480.f : 640.f;
-    float x0 = (640.f - w) / 2.f;
-    draw_quad(&menu_obj, x0, 0, x0 + w, 480, 0, 0, 1, 1);
+    float w = widescreen ? scr_w * 0.75f : scr_w;
+    float x0 = (scr_w - w) / 2.f;
+    float y0 = (scr_h - 480.f) / 2.f;
+    draw_quad(&menu_obj, x0, y0, x0 + w, y0 + 480.f, 0, 0, 1, 1);
     present();
 }
 
@@ -306,12 +338,12 @@ static void audio_push(nes_t *n)
             ring_w++;
         }
     }
-    /* Dynamic rate control: the Wii runs at 59.94 Hz, the NES at 60.0988 Hz.
+    /* Dynamic rate control: the TV runs at 59.94/50 Hz, the NES at 60.0988/50.007 Hz.
      * Nudge the core's output rate (max +-0.5%) to keep the ring ~2 DMA
      * buffers full, which hides the mismatch without audible pitch change. */
     int fill = (int)(ring_w - ring_r);
     const int target = DMA_FRAMES * 3;
-    double base = SAMPLE_RATE * 60.0988 / 59.94;
+    double base = SAMPLE_RATE * nes_fps(n) / display_hz;
     double adj = (double)(target - fill) / target * 0.005;
     if (adj > 0.005) adj = 0.005;
     if (adj < -0.005) adj = -0.005;
@@ -523,10 +555,12 @@ static void save_sram(int force)
 static void load_config(void)
 {
     char p[300];
-    snprintf(p, sizeof p, "%s/nescore.cfg", rom_dir);
+    snprintf(p, sizeof p, "%s/nescore_v2.cfg", rom_dir);
     FILE *f = fopen(p, "r");
     if (!f) return;
-    fscanf(f, "%d %d %d %d", &cfg.runahead, &cfg.smooth, &cfg.crop, &cfg.stretch);
+    fscanf(f, "%d %d %d %d %d", &cfg.runahead, &cfg.smooth, &cfg.crop, &cfg.stretch, &cfg.region);
+    if (cfg.region < 0 || cfg.region > 2) cfg.region = 0;
+    if (cfg.stretch < 0 || cfg.stretch > 2) cfg.stretch = 2;
     fclose(f);
     if (cfg.runahead < 0 || cfg.runahead > 2) cfg.runahead = 0;
 }
@@ -534,10 +568,10 @@ static void load_config(void)
 static void save_config(void)
 {
     char p[300];
-    snprintf(p, sizeof p, "%s/nescore.cfg", rom_dir);
+    snprintf(p, sizeof p, "%s/nescore_v2.cfg", rom_dir);
     FILE *f = fopen(p, "w");
     if (!f) return;
-    fprintf(f, "%d %d %d %d\n", cfg.runahead, cfg.smooth, cfg.crop, cfg.stretch);
+    fprintf(f, "%d %d %d %d %d\n", cfg.runahead, cfg.smooth, cfg.crop, cfg.stretch, cfg.region);
     fclose(f);
 }
 
@@ -675,9 +709,9 @@ static int browse(void)
 
 static u32 frame_us_avg;
 
-enum { M_RESUME, M_SAVE, M_LOAD, M_RESET, M_RUNAHEAD, M_SMOOTH, M_CROP, M_STRETCH, M_ROMS, M_EXIT, M_COUNT };
+enum { M_RESUME, M_SAVE, M_LOAD, M_RESET, M_REGION, M_RUNAHEAD, M_SMOOTH, M_CROP, M_STRETCH, M_ROMS, M_EXIT, M_COUNT };
 
-/* returns 0 resume, 1 back to ROM list, 2 quit */
+/* returns 0 resume, 1 back to ROM list, 2 quit, 3 restart (region changed) */
 static int game_menu(void)
 {
     static const char *ra_names[3] = {"off", "1 frame", "2 frames"};
@@ -717,7 +751,11 @@ static int game_menu(void)
             case M_RUNAHEAD: cfg.runahead = (cfg.runahead + ((k & K_LEFT) ? 2 : 1)) % 3; save_config(); break;
             case M_SMOOTH: cfg.smooth ^= 1; save_config(); break;
             case M_CROP: cfg.crop ^= 1; save_config(); break;
-            case M_STRETCH: cfg.stretch ^= 1; save_config(); break;
+            case M_STRETCH: cfg.stretch = (cfg.stretch + ((k & K_LEFT) ? 2 : 1)) % 3; save_config(); break;
+            case M_REGION:
+                cfg.region = (cfg.region + ((k & K_LEFT) ? 2 : 1)) % 3;
+                save_config();
+                return 3; /* restart the game with the new timing */
             case M_ROMS: return 1;
             case M_EXIT: return 2;
             }
@@ -727,10 +765,14 @@ static int game_menu(void)
         snprintf(items[M_SAVE], 64, "Save state");
         snprintf(items[M_LOAD], 64, "Load state");
         snprintf(items[M_RESET], 64, "Reset console");
+        static const char *region_names[3] = {"auto", "NTSC (60 Hz)", "PAL (50 Hz)"};
+        snprintf(items[M_REGION], 64, "Region: %s, now %s", region_names[cfg.region],
+                 nes_is_pal(nes) ? "PAL" : "NTSC");
         snprintf(items[M_RUNAHEAD], 64, "Run-ahead (less input lag): %s", ra_names[cfg.runahead]);
         snprintf(items[M_SMOOTH], 64, "Smooth scaling: %s", cfg.smooth ? "on" : "off");
         snprintf(items[M_CROP], 64, "Hide overscan: %s", cfg.crop ? "on" : "off");
-        snprintf(items[M_STRETCH], 64, "Aspect: %s", cfg.stretch ? "stretch 4:3" : "pixel accurate 8:7");
+        static const char *aspect_names[3] = {"8:7 like a real NES", "stretch 4:3", "sharp (exact 2x pixels)"};
+        snprintf(items[M_STRETCH], 64, "Picture: %s", aspect_names[cfg.stretch]);
         snprintf(items[M_ROMS], 64, "Choose another game");
         snprintf(items[M_EXIT], 64, "Exit to loader");
 
@@ -759,6 +801,21 @@ static int game_menu(void)
 
 /* ------------------------------------------------------------------ */
 
+/* GoodNES / No-Intro region tags for European and Australian releases */
+static int name_is_pal(const char *name)
+{
+    static const char *tags[] = {"(E)", "(Europe", "(EU)", "(PAL", "(Australia", "(A)",
+                                 "(G)", "(F)", "(I)", "(Sw)", "(Germany", "(France",
+                                 "(Italy", "(Spain", "(Sweden", "(Netherlands", NULL};
+    if (strstr(name, "(USA") || strstr(name, "(U)") || strstr(name, "(J") || strstr(name, "(World"))
+        return 0;
+    for (int i = 0; tags[i]; i++)
+        if (strstr(name, tags[i]))
+            return 1;
+    return 0;
+}
+
+/* returns 0 to quit, 1 for the ROM list, 2 to restart the same game */
 static int run_game(void)
 {
     size_t size;
@@ -767,6 +824,9 @@ static int run_game(void)
         message("Error", "Could not read the ROM file.");
         return 1;
     }
+    nes_set_region(nes, cfg.region == 1 ? NES_REGION_NTSC :
+                        cfg.region == 2 ? NES_REGION_PAL :
+                        name_is_pal(rom_name) ? NES_REGION_PAL : NES_REGION_AUTO);
     int r = nes_load_rom(nes, data, size);
     free(data);
     if (r != NES_OK) {
@@ -789,6 +849,10 @@ static int run_game(void)
         sram_crc = checksum(ram, ram_size);
     }
 
+    GXRModeObj *want = nes_is_pal(nes) ? mode50 : mode60;
+    if (want != rmode)
+        video_apply(want);
+
     int frames = 0;
     while (!quit_requested) {
         WPAD_ScanPads();
@@ -804,6 +868,7 @@ static int run_game(void)
             menu_requested = 0;
             if (m == 1) { save_sram(1); return 1; }
             if (m == 2) { save_sram(1); return 0; }
+            if (m == 3) { save_sram(1); return 2; }
             continue;
         }
 
@@ -862,12 +927,18 @@ int main(int argc, char **argv)
             memcpy(rom_dir, rom_path, len);
             rom_dir[len] = 0;
         }
-        if (!run_game() || quit_requested)
+        int r;
+        while ((r = run_game()) == 2 && !quit_requested) {}
+        if (!r || quit_requested)
             goto out;
     }
     while (!quit_requested && browse()) {
-        if (!run_game())
+        int r;
+        while ((r = run_game()) == 2 && !quit_requested) {}
+        if (!r)
             break;
+        if (rmode != mode60)
+            video_apply(mode60);
     }
 out:
     nes_destroy(nes);
