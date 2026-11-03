@@ -36,6 +36,7 @@ export INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
                    -I$(CURDIR)/$(BUILD) -I$(LIBOGC_INC)
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib) -L$(LIBOGC_LIB)
 export UNITY    := $(CURDIR)/../unity/nescore.c
+export LD       := $(CC)
 
 .PHONY: $(BUILD) clean dist
 
