@@ -2,6 +2,7 @@
 #include "core.h"
 #include <math.h>
 #include <stdlib.h>
+#include "palettes.h"
 
 #define STATE_MAGIC 0x4E534331u /* "NSC1" */
 
@@ -302,5 +303,36 @@ void nes_palette_rgb(uint32_t rgb[512])
             out = out << 8 | (uint32_t)(x * 255.0f + 0.5f);
         }
         rgb[i] = out;
+    }
+}
+
+static const unsigned char *const measured[NES_PALETTE_COUNT] = {
+    NULL, pal_smooth_fbx, pal_composite_fbx, pal_hardware_fbx, pal_pvm_fbx};
+static const char *const palette_names[NES_PALETTE_COUNT] = {
+    "nescore (signal model)", "Smooth (FBX)", "Composite Direct (FBX)",
+    "NTSC Hardware (FBX)", "PVM D93 (FBX)"};
+
+const char *nes_palette_name(int which)
+{
+    return (which >= 0 && which < NES_PALETTE_COUNT) ? palette_names[which] : "?";
+}
+
+void nes_palette_rgb_ex(int which, uint32_t rgb[512])
+{
+    if (which <= 0 || which >= NES_PALETTE_COUNT) {
+        nes_palette_rgb(rgb);
+        return;
+    }
+    const unsigned char *t = measured[which];
+    for (int i = 0; i < 512; i++) {
+        int c = i & 63, emph = i >> 6;
+        float ch[3] = {t[c * 3], t[c * 3 + 1], t[c * 3 + 2]};
+        /* colour emphasis darkens the channels that are not emphasised
+         * (bit 0 red, bit 1 green, bit 2 blue); not for the black column */
+        if (emph && (c & 0x0F) < 0x0E)
+            for (int k = 0; k < 3; k++)
+                if (!(emph & (1 << k)))
+                    ch[k] *= 0.816f;
+        rgb[i] = (uint32_t)(ch[0] + 0.5f) << 16 | (uint32_t)(ch[1] + 0.5f) << 8 | (uint32_t)(ch[2] + 0.5f);
     }
 }

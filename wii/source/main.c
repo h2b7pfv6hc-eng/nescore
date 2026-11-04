@@ -55,7 +55,8 @@ static struct {
     int crop;        /* hide the top/bottom 8 lines like a CRT */
     int stretch;     /* 0 = 8:7, 1 = 4:3 stretch, 2 = sharp 2x */
     int region;      /* 0 auto (file name / header), 1 NTSC, 2 PAL */
-} cfg = {0, 0, 1, 2, 0};
+    int palette;     /* see nes_palette_name() */
+} cfg = {1, 0, 1, 2, 0, 1};
 
 /* Output modes: NTSC games are shown at 60 Hz, PAL games at 50 Hz (on a
  * PAL console), so every game runs at its own speed, locked to the TV. */
@@ -95,6 +96,16 @@ static void video_apply(GXRModeObj *m)
     Mtx44 proj;
     guOrtho(proj, 0, scr_h, 0, scr_w, 0, 1);
     GX_LoadProjectionMtx(proj, GX_ORTHOGRAPHIC);
+}
+
+static void build_palette(void)
+{
+    uint32_t rgb[512];
+    nes_palette_rgb_ex(cfg.palette, rgb);
+    for (int i = 0; i < 512; i++) {
+        u32 c = rgb[i];
+        pal565[i] = (u16)(((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x001F));
+    }
 }
 
 static void video_init(void)
@@ -152,12 +163,7 @@ static void video_init(void)
     menu_tex = memalign(32, MENU_W * MENU_H * 2);
     menu_lin = memalign(32, MENU_W * MENU_H * 2);
 
-    uint32_t rgb[512];
-    nes_palette_rgb(rgb);
-    for (int i = 0; i < 512; i++) {
-        u32 c = rgb[i];
-        pal565[i] = (u16)(((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x001F));
-    }
+    build_palette();
 }
 
 static void tex_setup(GXTexObj *obj, void *data, int w, int h, int smooth)
@@ -598,7 +604,8 @@ static void load_config(void)
     snprintf(p, sizeof p, "%s/nescore_v2.cfg", rom_dir);
     FILE *f = fopen(p, "r");
     if (!f) return;
-    fscanf(f, "%d %d %d %d %d", &cfg.runahead, &cfg.smooth, &cfg.crop, &cfg.stretch, &cfg.region);
+    fscanf(f, "%d %d %d %d %d %d", &cfg.runahead, &cfg.smooth, &cfg.crop, &cfg.stretch, &cfg.region, &cfg.palette);
+    if (cfg.palette < 0 || cfg.palette >= NES_PALETTE_COUNT) cfg.palette = 1;
     if (cfg.region < 0 || cfg.region > 2) cfg.region = 0;
     if (cfg.stretch < 0 || cfg.stretch > 2) cfg.stretch = 2;
     fclose(f);
@@ -611,7 +618,7 @@ static void save_config(void)
     snprintf(p, sizeof p, "%s/nescore_v2.cfg", rom_dir);
     FILE *f = fopen(p, "w");
     if (!f) return;
-    fprintf(f, "%d %d %d %d %d\n", cfg.runahead, cfg.smooth, cfg.crop, cfg.stretch, cfg.region);
+    fprintf(f, "%d %d %d %d %d %d\n", cfg.runahead, cfg.smooth, cfg.crop, cfg.stretch, cfg.region, cfg.palette);
     fclose(f);
 }
 
@@ -749,7 +756,7 @@ static int browse(void)
 
 static u32 frame_us_avg;
 
-enum { M_RESUME, M_SAVE, M_LOAD, M_RESET, M_REGION, M_RUNAHEAD, M_SMOOTH, M_CROP, M_STRETCH, M_ROMS, M_EXIT, M_COUNT };
+enum { M_RESUME, M_SAVE, M_LOAD, M_RESET, M_REGION, M_PALETTE, M_RUNAHEAD, M_SMOOTH, M_CROP, M_STRETCH, M_ROMS, M_EXIT, M_COUNT };
 
 static int save_state_file(void)
 {
@@ -804,6 +811,11 @@ static int game_menu(void)
             case M_SMOOTH: cfg.smooth ^= 1; save_config(); break;
             case M_CROP: cfg.crop ^= 1; save_config(); break;
             case M_STRETCH: cfg.stretch = (cfg.stretch + ((k & K_LEFT) ? 2 : 1)) % 3; save_config(); break;
+            case M_PALETTE:
+                cfg.palette = (cfg.palette + ((k & K_LEFT) ? NES_PALETTE_COUNT - 1 : 1)) % NES_PALETTE_COUNT;
+                build_palette();
+                save_config();
+                break;
             case M_REGION:
                 cfg.region = (cfg.region + ((k & K_LEFT) ? 2 : 1)) % 3;
                 save_config();
@@ -820,6 +832,7 @@ static int game_menu(void)
         static const char *region_names[3] = {"auto", "NTSC (60 Hz)", "PAL (50 Hz)"};
         snprintf(items[M_REGION], 64, "Region: %s, now %s", region_names[cfg.region],
                  nes_is_pal(nes) ? "PAL" : "NTSC");
+        snprintf(items[M_PALETTE], 64, "Colours: %s", nes_palette_name(cfg.palette));
         snprintf(items[M_RUNAHEAD], 64, "Run-ahead (less input lag): %s", ra_names[cfg.runahead]);
         snprintf(items[M_SMOOTH], 64, "Smooth scaling: %s", cfg.smooth ? "on" : "off");
         snprintf(items[M_CROP], 64, "Hide overscan: %s", cfg.crop ? "on" : "off");
@@ -832,12 +845,14 @@ static int game_menu(void)
         m_rect(0, 0, MENU_W, 44, C_BAR);
         m_text(1, 0, "nescore", C_ACCENT);
         m_text(1, 1, rom_name, C_TEXT);
+        /* one row per item, with a small gap after each group */
+        static const int row[M_COUNT] = {3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 16, 17};
         for (int i = 0; i < M_COUNT; i++) {
             if (i == sel) {
-                m_rect(8, 16 + (4 + i * 2) * 16, MENU_W - 16, 16, C_BAR);
-                m_text(2, 4 + i * 2, items[i], C_HI);
+                m_rect(8, 16 + row[i] * 16, MENU_W - 16, 16, C_BAR);
+                m_text(2, row[i], items[i], C_HI);
             } else {
-                m_text(2, 4 + i * 2, items[i], C_TEXT);
+                m_text(2, row[i], items[i], C_TEXT);
             }
         }
         char perf[96];

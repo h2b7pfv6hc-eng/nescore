@@ -73,6 +73,12 @@ const uint16_t *nes_framebuffer(const nes_t *n);
 /* Fill rgb[512] with 0x00RRGGBB for every (colour | emphasis) index. */
 void nes_palette_rgb(uint32_t rgb[512]);
 
+/* Same, for a chosen palette: 0 = nescore's signal model, 1..N = palettes
+ * measured on real hardware (see nes_palette_name). */
+#define NES_PALETTE_COUNT 5
+void nes_palette_rgb_ex(int which, uint32_t rgb[512]);
+const char *nes_palette_name(int which);
+
 /* Pull up to max mono samples; returns the number written. */
 int nes_audio_read(nes_t *n, int16_t *out, int max);
 int nes_audio_available(const nes_t *n);
