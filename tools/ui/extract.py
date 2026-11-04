@@ -24,6 +24,7 @@ out.append(re.search(r"typedef struct \{ char name\[128\]; int is_dir; \} entry_
 out.append("static entry_t *entries;\nstatic int n_entries;\n")
 for e in re.findall(r"^enum \{ (?:B_BACK|M_RESUME)[^;]*;", src, re.M):
     out.append(e + "\n")
+out.append("static char player[40] = \"Player: Mario\";\nstatic int from_shelf = 1;\n")
 for f in ["static void header(", "static void button(", "static void draw_browser(",
           "static void m_thumbnail(", "static void draw_game_menu("]:
     func(f)

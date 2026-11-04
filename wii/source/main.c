@@ -16,6 +16,7 @@
 #include <gccore.h>
 #include <wiiuse/wpad.h>
 #include <ogc/lwp_watchdog.h>
+#include <ogc/machine/processor.h>
 #include <fat.h>
 #include <dirent.h>
 #include <malloc.h>
@@ -27,6 +28,7 @@
 #include <unistd.h>
 
 #include "nes.h"
+#include "../stub/dolboot.h"
 
 #define SAMPLE_RATE 48000
 #define FIFO_SIZE (256 * 1024)
@@ -269,23 +271,27 @@ static void draw_game(void)
 /* menu drawing: a 512x480 RGB565 canvas, shown full screen              */
 
 #define RGB(r, g, b) (u16)((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3))
-#define C_TEXT    RGB(52, 58, 68)
-#define C_DIM     RGB(122, 130, 142)
-#define C_LINE    RGB(200, 207, 216)
-#define C_CARD    RGB(255, 255, 255)
-#define C_HOVER   RGB(232, 246, 253)
-#define C_BLUE    RGB(40, 172, 232)
-#define C_BLUE_DK RGB(18, 120, 178)
-#define C_FOLDER  RGB(240, 190, 70)
-#define C_CART    RGB(150, 156, 166)
-#define C_OK      RGB(46, 160, 90)
+/* dark theme in the style of Retro Shelf 8: near-black, red accents */
+#define C_TEXT    RGB(236, 237, 240)
+#define C_DIM     RGB(139, 143, 153)
+#define C_LINE    RGB(52, 54, 62)
+#define C_CARD    RGB(32, 34, 41)
+#define C_HOVER   RGB(46, 40, 44)
+#define C_BLUE    RGB(226, 56, 56)      /* accent (red) */
+#define C_BLUE_DK RGB(170, 36, 36)
+#define C_FOLDER  RGB(232, 180, 64)
+#define C_CART    RGB(110, 114, 124)
+#define C_OK      RGB(46, 158, 90)
+#define C_WHITE   RGB(255, 255, 255)
+#define C_BLACK   RGB(10, 10, 12)
+#define C_HEAD    RGB(24, 25, 31)
 
 static void m_clear(void)
 {
     /* soft vertical gradient */
     for (int y = 0; y < MENU_H; y++) {
         int t = y * 255 / MENU_H;
-        u16 c = RGB(244 - t * 22 / 255, 246 - t * 20 / 255, 249 - t * 16 / 255);
+        u16 c = RGB(22 - t * 8 / 255, 23 - t * 8 / 255, 28 - t * 9 / 255);
         u16 *row = &menu_lin[y * MENU_W];
         for (int x = 0; x < MENU_W; x++)
             row[x] = c;
@@ -384,7 +390,7 @@ static void m_icon_folder(int x, int y)
 static void m_icon_cart(int x, int y)
 {
     m_round(x + 1, y, 16, 16, 2, C_CART);
-    m_rect(x + 4, y + 3, 10, 6, RGB(210, 214, 220));
+    m_rect(x + 4, y + 3, 10, 6, RGB(180, 184, 192));
     for (int i = 0; i < 4; i++)
         m_rect(x + 3 + i * 3, y + 13, 2, 3, RGB(110, 116, 126));
 }
@@ -402,13 +408,13 @@ static void m_cursor(int px, int py)
         for (int i = 0; shape[j][i]; i++) {
             char ch = shape[j][i];
             if (ch == '#')
-                m_rect(px + i - 1, py + j - 1, 3, 3, C_CARD);
+                m_rect(px + i - 1, py + j - 1, 3, 3, C_BLACK);
         }
     for (int j = 0; shape[j]; j++)
         for (int i = 0; shape[j][i]; i++) {
             char ch = shape[j][i];
-            if (ch == '#') m_rect(px + i, py + j, 1, 1, C_BLUE_DK);
-            else if (ch == '.') m_rect(px + i, py + j, 1, 1, C_BLUE);
+            if (ch == '#') m_rect(px + i, py + j, 1, 1, j < 4 ? C_BLUE : C_WHITE);
+            else if (ch == '.') m_rect(px + i, py + j, 1, 1, j < 4 ? C_BLUE : C_WHITE);
         }
 }
 
@@ -774,6 +780,22 @@ static void power_cb(void) { quit_requested = 2; }
 static void wpad_power_cb(s32 chan) { (void)chan; quit_requested = 2; }
 static void reset_cb(u32 irq, void *ctx) { (void)irq; (void)ctx; quit_requested = 1; }
 
+static int want_shelf;       /* leave for Retro Shelf after the game */
+static int profile = -1;     /* Retro Shelf user, -1 when started otherwise */
+static char save_dir[300];
+
+/* <rom folder>/saves, or <rom folder>/saves/profile<N> for a Retro Shelf user */
+static void setup_save_dir(void)
+{
+    snprintf(save_dir, sizeof save_dir, "%s/saves", rom_dir);
+    mkdir(save_dir, 0777);
+    if (profile >= 0) {
+        size_t l = strlen(save_dir);
+        snprintf(save_dir + l, sizeof(save_dir) - l, "/profile%d", profile);
+        mkdir(save_dir, 0777);
+    }
+}
+
 static void make_path(char *out, size_t sz, const char *ext)
 {
     char base[256];
@@ -781,7 +803,7 @@ static void make_path(char *out, size_t sz, const char *ext)
     base[sizeof(base) - 1] = 0;
     char *dot = strrchr(base, '.');
     if (dot) *dot = 0;
-    snprintf(out, sz, "%s/saves/%s%s", rom_dir, base, ext);
+    snprintf(out, sz, "%s/%s%s", save_dir, base, ext);
 }
 
 static int write_file(const char *path, const void *data, size_t size)
@@ -855,14 +877,20 @@ static void save_config(void)
     fclose(f);
 }
 
-static void header(const char *subtitle)
+static char player[40];      /* "Player: NAME" when started by Retro Shelf */
+static int from_shelf;
+
+static void header(const char *subtitle, int show_player)
 {
-    m_rect(0, 0, MENU_W, 56, C_CARD);
-    m_rect(0, 56, MENU_W, 2, C_LINE);
-    m_textp(20, 12, "nescore", C_TEXT, 2);
-    m_rect(20, 46, 112, 3, C_BLUE);
+    m_rect(0, 0, MENU_W, 56, C_HEAD);
+    m_rect(0, 56, MENU_W, 2, C_BLUE);
+    m_round(14, 10, 124, 36, 4, C_BLUE);
+    m_textp(20, 12, "nescore", C_WHITE, 2);
+    int right = show_player && player[0] ? (int)strlen(player) * 8 + 24 : 0;
     if (subtitle)
-        m_textfit(150, 22, subtitle, C_DIM, MENU_W - 150 - 120);
+        m_textfit(152, 20, subtitle, C_DIM, MENU_W - 152 - (right ? right : 120));
+    if (right)
+        m_textp(MENU_W - (int)strlen(player) * 8 - 16, 20, player, C_TEXT, 1);
 }
 
 static void button(hit_t *h, const char *label, int focused, int primary)
@@ -870,7 +898,7 @@ static void button(hit_t *h, const char *label, int focused, int primary)
     u16 fill = primary ? (focused ? C_BLUE_DK : C_BLUE) : (focused ? C_HOVER : C_CARD);
     u16 border = focused ? C_BLUE : C_LINE;
     m_box(h->x, h->y, h->w, h->h, 8, focused ? 3 : 1, border, fill);
-    m_text_center(h->x + h->w / 2, h->y + h->h / 2 - 8, label, primary ? C_CARD : C_TEXT, 1);
+    m_text_center(h->x + h->w / 2, h->y + h->h / 2 - 8, label, primary ? C_WHITE : C_TEXT, 1);
 }
 
 static void message(const char *title, const char *msg)
@@ -883,7 +911,7 @@ static void message(const char *title, const char *msg)
         int k = ui_step(&focus, &act, &dir);
         if (act == 0 || (k & K_BACK)) break;
         m_clear();
-        header(NULL);
+        header(NULL, 0);
         m_box(56, 150, 400, 210, 14, 1, C_LINE, C_CARD);
         m_text_center(256, 180, title, C_TEXT, 1);
         m_rect(76, 204, 360, 1, C_LINE);
@@ -949,7 +977,7 @@ enum { B_BACK = 1, B_UP, B_DOWN, B_EXIT, B_ROW = 100 };
 static void draw_browser(const char *cur, int top, int rows, int n_rows, int focus)
 {
     m_clear();
-    header("Choose a game");
+    header("Choose a game", 0);
     for (int i = 0; i < n_hits; i++) {
         hit_t *h = &hits[i];
         int f = i == focus;
@@ -1127,7 +1155,7 @@ static void draw_game_menu(int focus, const char *status, int status_ok)
     char *dot = strrchr(title, '.');
     if (dot) *dot = 0;
     m_clear();
-    header(title);
+    header(title, 1);
     m_thumbnail(52, 72);
     for (int i = 0; i < n_hits; i++) {
         hit_t *h = &hits[i];
@@ -1135,6 +1163,10 @@ static void draw_game_menu(int focus, const char *status, int status_ok)
         static const char *labels[M_COUNT] = {
             [M_RESUME] = "Resume", [M_SAVE] = "Save state", [M_LOAD] = "Load state",
             [M_RESET] = "Reset", [M_ROMS] = "Other game", [M_EXIT] = "Exit to loader"};
+        if (h->kind == 0 && h->id == M_ROMS && from_shelf) {
+            button(h, "Retro Shelf 8", f, 0);
+            continue;
+        }
         if (h->kind == 0) {
             button(h, labels[h->id], f, h->id == M_RESUME);
             continue;
@@ -1165,12 +1197,12 @@ static void draw_game_menu(int focus, const char *status, int status_ok)
     m_textp(232, 378, info, C_DIM, 1);
     if (status[0]) {
         m_round(232, 400, 264, 26, 6, status_ok ? C_OK : RGB(210, 80, 60));
-        m_text_center(364, 405, status, C_CARD, 1);
+        m_text_center(364, 405, status, C_WHITE, 1);
     }
     m_textp(20, 446, "Point + A: select   B / HOME: back to game", C_DIM, 1);
 }
 
-/* returns 0 resume, 1 back to ROM list, 2 quit, 3 restart (region changed) */
+/* returns 0 resume, 1 back to ROM list, 2 quit, 3 restart (region changed), 4 Retro Shelf */
 static int game_menu(void)
 {
     int focus = 0, act, dir;
@@ -1183,6 +1215,7 @@ static int game_menu(void)
         static const int left_ids[6] = {M_RESUME, M_SAVE, M_LOAD, M_RESET, M_ROMS, M_EXIT};
         for (int i = 0; i < 6; i++)
             hit_add(16, 200 + i * 38, 200, 32, left_ids[i], 0);
+        /* started by Retro Shelf: "Other game" goes back to the shelf */
         static const int right_ids[6] = {M_REGION, M_PALETTE, M_RUNAHEAD, M_SMOOTH, M_CROP, M_STRETCH};
         for (int i = 0; i < 6; i++)
             hit_add(232, 70 + i * 50, 264, 44, right_ids[i], 1);
@@ -1203,7 +1236,7 @@ static int game_menu(void)
                 strcpy(status, "No state saved yet");
                 break;
             case M_RESET: nes_reset(nes); rumble_off(); return 0;
-            case M_ROMS: rumble_off(); return 1;
+            case M_ROMS: rumble_off(); return from_shelf ? 4 : 1;
             case M_EXIT: rumble_off(); return 2;
             case M_RUNAHEAD: cfg.runahead = (cfg.runahead + 3 + d) % 3; save_config(); break;
             case M_SMOOTH: cfg.smooth ^= 1; save_config(); break;
@@ -1269,8 +1302,7 @@ static int run_game(void)
         return 1;
     }
     char p[512];
-    snprintf(p, sizeof p, "%s/saves", rom_dir);
-    mkdir(p, 0777);
+    setup_save_dir();
     size_t ram_size;
     u8 *ram = nes_battery_ram(nes, &ram_size);
     if (ram) {
@@ -1302,6 +1334,7 @@ static int run_game(void)
             if (m == 1) { save_sram(1); return 1; }
             if (m == 2) { save_sram(1); return 0; }
             if (m == 3) { save_sram(1); return 2; }
+            if (m == 4) { save_sram(1); want_shelf = 1; return 0; }
             continue;
         }
 
@@ -1335,6 +1368,175 @@ static int run_game(void)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Retro Shelf                                                          */
+
+static const char *shelf_paths[] = {"sd:/apps/retroshelf/boot.dol", "usb:/apps/retroshelf/boot.dol", NULL};
+
+static int has_rom_ext(const char *s)
+{
+    const char *e = strrchr(s, '.');
+    return e && (!strcasecmp(e, ".nes") || !strcasecmp(e, ".unf") || !strcasecmp(e, ".unif"));
+}
+
+/* first printable line of a small text file */
+static int read_line(const char *path, char *out, size_t n)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char buf[128];
+    int ok = fgets(buf, sizeof buf, f) != NULL;
+    fclose(f);
+    if (!ok) return 0;
+    size_t j = 0;
+    for (size_t i = 0; buf[i] && buf[i] != '\n' && buf[i] != '\r' && buf[i] != '\t' && j + 1 < n; i++)
+        if (buf[i] >= 32 && buf[i] < 127)
+            out[j++] = buf[i];
+    out[j] = 0;
+    return j > 0;
+}
+
+/*
+ * Arguments from a loader. Retro Shelf 8 starts its emulator the way
+ * FCE Ultra GX expects: the ROM folder and the file name, plus
+ * "rsprofile=<user>;<retro shelf folder>/achievements/;..." for its users.
+ * A single full path (forwarders) works too.
+ */
+static int parse_args(int argc, char **argv)
+{
+    char folder[256] = "", file[256] = "", achdir[256] = "";
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!a || !a[0]) continue;
+        if (!strncmp(a, "rsprofile=", 10)) {
+            from_shelf = 1;
+            profile = atoi(a + 10);
+            const char *semi = strchr(a, ';');
+            if (semi) {
+                const char *end = strchr(semi + 1, ';');
+                size_t len = end ? (size_t)(end - semi - 1) : strlen(semi + 1);
+                if (len < sizeof achdir) {
+                    memcpy(achdir, semi + 1, len);
+                    achdir[len] = 0;
+                }
+            }
+        } else if (has_rom_ext(a)) {
+            strncpy(file, a, sizeof(file) - 1);
+        } else if (strchr(a, '/')) {
+            strncpy(folder, a, sizeof(folder) - 1);
+        }
+    }
+    if (!file[0])
+        return 0;
+    char full[512];
+    if (strchr(file, '/')) {
+        strncpy(full, file, sizeof(full) - 1);
+        full[sizeof(full) - 1] = 0;
+    } else {
+        size_t l = strlen(folder);
+        while (l && folder[l - 1] == '/') folder[--l] = 0;
+        snprintf(full, sizeof full, "%s/%s", folder, file);
+    }
+    /* a path without a device: try SD, then USB */
+    if (!strchr(full, ':')) {
+        char tmp[520];
+        struct stat st;
+        snprintf(tmp, sizeof tmp, "sd:%s%s", full[0] == '/' ? "" : "/", full);
+        if (stat(tmp, &st) != 0)
+            snprintf(tmp, sizeof tmp, "usb:%s%s", full[0] == '/' ? "" : "/", full);
+        strncpy(full, tmp, sizeof(full) - 1);
+        full[sizeof(full) - 1] = 0;
+    }
+    strncpy(rom_path, full, sizeof(rom_path) - 1);
+    const char *slash = strrchr(rom_path, '/');
+    strncpy(rom_name, slash ? slash + 1 : rom_path, sizeof(rom_name) - 1);
+    if (slash) {
+        size_t len = (size_t)(slash - rom_path);
+        memcpy(rom_dir, rom_path, len);
+        rom_dir[len] = 0;
+    }
+    /* started with a game while Retro Shelf is installed: offer the way back */
+    struct stat st;
+    for (int i = 0; shelf_paths[i]; i++)
+        if (stat(shelf_paths[i], &st) == 0)
+            from_shelf = 1;
+    if (profile >= 0) {
+        char name[32] = "", path[320];
+        snprintf(path, sizeof path, "%sprofile%d/user.txt", achdir, profile);
+        if (!achdir[0] || !read_line(path, name, sizeof name)) {
+            snprintf(path, sizeof path, "%suser.txt", achdir);
+            if (!achdir[0] || profile > 0 || !read_line(path, name, sizeof name))
+                snprintf(name, sizeof name, "%d", profile + 1);
+        }
+        snprintf(player, sizeof player, "Player: %s", name);
+    }
+    return 1;
+}
+
+/*
+ * Start another program (a .dol file), the way the Homebrew Channel does:
+ * the file and a small copy routine (stub/dolboot.S) go to the top of MEM2,
+ * everything is shut down, and the routine copies the program into place
+ * and jumps to it. Returns only when the file could not be used.
+ */
+static int launch_dol(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 0x100 || size > 16 * 1024 * 1024) { fclose(f); return 0; }
+
+    u32 need = ((u32)size + 256 + 63) & ~31u;
+    u32 hi = (u32)SYS_GetArena2Hi();
+    u32 base = (hi - need) & ~31u;
+    if (base <= (u32)SYS_GetArena2Lo()) { fclose(f); return 0; }
+    u8 *stub = (u8 *)base, *dol = (u8 *)(base + 256);
+    if (fread(dol, 1, (size_t)size, f) != (size_t)size) { fclose(f); return 0; }
+    fclose(f);
+
+    /* sanity checks: an entry point in MEM1 and no section over our copy */
+    u32 *hdr = (u32 *)dol;
+    if (hdr[56] < 0x80000000u || hdr[56] >= 0x81800000u) return 0;
+    for (int i = 0; i < 18; i++) {
+        u32 a = hdr[18 + i], sz = hdr[36 + i];
+        if (!sz) continue;
+        if (hdr[i] + sz > (u32)size) return 0;
+        if (a < base + need && a + sz > base) return 0;
+    }
+    SYS_SetArena2Hi((void *)base);
+    memcpy(stub, dolboot_code, sizeof dolboot_code);
+    DCFlushRange(stub, 256);
+    ICInvalidateRange(stub, 256);
+    DCFlushRange(dol, (u32)size);
+
+    /* shut everything down */
+    rumble_off();
+    AUDIO_StopDMA();
+    AUDIO_RegisterDMACallback(NULL);
+    WPAD_Shutdown();
+    VIDEO_SetBlack(true);
+    VIDEO_Flush();
+    VIDEO_WaitVSync();
+    fatUnmount("sd:");
+    fatUnmount("usb:");
+    SYS_ResetSystem(SYS_SHUTDOWN, 0, 0);
+    u32 level;
+    _CPU_ISR_Disable(level);
+    (void)level;
+    ((void (*)(void *))stub)(dol);
+    return 0; /* not reached */
+}
+
+
+static void go_to_shelf(void)
+{
+    for (int i = 0; shelf_paths[i]; i++)
+        launch_dol(shelf_paths[i]);
+    message("Could not start Retro Shelf 8", "Is it in sd:/apps/retroshelf/?");
+}
+
 int main(int argc, char **argv)
 {
     video_init();
@@ -1360,18 +1562,18 @@ int main(int argc, char **argv)
     load_config();
 
     nes = nes_create(SAMPLE_RATE);
-    /* a ROM path passed by a loader (e.g. a forwarder) starts directly */
-    if (argc > 1 && argv[1] && strstr(argv[1], ".nes")) {
-        strncpy(rom_path, argv[1], sizeof(rom_path) - 1);
-        const char *slash = strrchr(rom_path, '/');
-        strncpy(rom_name, slash ? slash + 1 : rom_path, sizeof(rom_name) - 1);
-        if (slash) {
-            size_t len = (size_t)(slash - rom_path);
-            memcpy(rom_dir, rom_path, len);
-            rom_dir[len] = 0;
-        }
+    /* a game passed by a loader (Retro Shelf, a forwarder) starts directly */
+    if (parse_args(argc, argv)) {
         int r;
         while ((r = run_game()) == 2 && !quit_requested) {}
+        /* a game started from Retro Shelf that could not run goes back too */
+        if (from_shelf && r == 1 && !quit_requested)
+            want_shelf = 1;
+        if (want_shelf && !quit_requested) {
+            nes_destroy(nes);
+            nes = NULL;
+            go_to_shelf();
+        }
         if (!r || quit_requested)
             goto out;
     }
@@ -1384,7 +1586,8 @@ int main(int argc, char **argv)
             video_apply(mode60);
     }
 out:
-    nes_destroy(nes);
+    if (nes)
+        nes_destroy(nes);
     AUDIO_StopDMA();
     if (quit_requested == 2)
         SYS_ResetSystem(SYS_POWEROFF, 0, 0);

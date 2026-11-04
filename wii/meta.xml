@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <app version="1">
-  <name>nescore</name>
-  <coder>nescore contributors</coder>
-  <version>0.1</version>
-  <release_date>20261103</release_date>
+  <name>nescore (Retro Shelf edition)</name>
+  <coder>Claude</coder>
+  <version>0.2</version>
+  <release_date>20261104</release_date>
   <short_description>Cycle-accurate NES emulator</short_description>
-  <long_description>A cycle-accurate NES emulator built for the Wii.
+  <long_description>A cycle-accurate NES emulator for the Wii, in the style of Retro Shelf 8.
 
-Put .nes files in sd:/nes/ (or usb:/nes/).
-Press HOME (or L+R on a GameCube pad) for the menu: savestates, run-ahead (lower input lag), scaling options.
+Start your games from Retro Shelf 8 (set emulator=sd:/apps/nescore/boot.dol in apps/retroshelf/config.ini), or from nescore's own game list (sd:/nes or sd:/roms/nes).
 
-Supported mappers: 0, 1, 2, 3, 4, 7, 9, 10, 11, 66, 71.</long_description>
+HOME opens the menu: point with the Wii Remote and press A. Hold B and press + to save, B and - to load. "Retro Shelf 8" in the menu takes you back to the shelf.</long_description>
   <ahb_access/>
 </app>

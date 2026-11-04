@@ -110,6 +110,29 @@ op echte hardware gemeten paletten van FirebrandX), run-ahead (uit/1/2 frames),
 scherpe of zachte schaling, overscan verbergen, beeldverhouding (8:7
 pixel-accuraat of 4:3) en een andere game kiezen.
 
+## Samen met Retro Shelf 8
+
+nescore kan de emulator van Retro Shelf 8 zijn, in plaats van FCE Ultra GX.
+
+1. Zet nescore in `sd:/apps/nescore/` (boot.dol, meta.xml, icon.png).
+2. Open `sd:/apps/retroshelf/config.ini` en zet deze regel erin (zonder `#` ervoor):
+   ```
+   emulator=sd:/apps/nescore/boot.dol
+   ```
+3. Start Retro Shelf 8 en kies een game: die start nu in nescore.
+
+Wat er dan werkt:
+- **Retro Shelf 8** in het HOME-menu brengt je terug naar de plank (nescore laadt
+  Retro Shelf zelf, zonder omweg via het Homebrew Channel).
+- **Saves per gebruiker**: in `saves/profile<N>/` naast je games, zodat iedere
+  speler zijn eigen savestates en batterijsaves heeft.
+- **"Player: NAAM"** rechtsboven in het menu.
+- Dezelfde donkere stijl met rode accenten als Retro Shelf.
+
+Nog niet: de achievements van Retro Shelf. Die werken voorlopig alleen in de
+Retro Shelf-editie van FCE Ultra GX. Wissel terug door de `emulator=`-regel
+weer weg te halen.
+
 ## Ondersteunde mappers
 
 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3), 7 (AxROM), 9 (MMC2),
