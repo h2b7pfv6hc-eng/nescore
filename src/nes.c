@@ -290,8 +290,10 @@ void nes_palette_rgb(uint32_t rgb[512])
         }
         y /= 12.0f; u /= 12.0f; v /= 12.0f;
         float hue = 20.0f * 3.14159265f / 180.0f;
-        float uu = u * cosf(hue) - v * sinf(hue);
-        float vv = u * sinf(hue) + v * cosf(hue);
+        /* 1.5x chroma gain: matches how a TV's decoder shows NES colours */
+        const float sat = 1.5f;
+        float uu = sat * (u * cosf(hue) - v * sinf(hue));
+        float vv = sat * (u * sinf(hue) + v * cosf(hue));
         float c[3] = {y + 1.139883f * vv, y - 0.394642f * uu - 0.580622f * vv, y + 2.032062f * uu};
         uint32_t out = 0;
         for (int k = 0; k < 3; k++) {

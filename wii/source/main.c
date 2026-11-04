@@ -11,6 +11,7 @@
  *   Classic / Wii U Pro: D-pad/left stick, A/X = A, B/Y = B
  *   GameCube: D-pad/stick, A = A, B = B, Start, Z = Select
  *   Menu: HOME (Wii Remote/Classic) or L+R (GameCube)
+ *   Quick save: hold B, press +   Quick load: hold B, press -
  */
 #include <gccore.h>
 #include <wiiuse/wpad.h>
@@ -209,6 +210,33 @@ static void upload_game(const uint16_t *fb)
     GX_InvalidateTexAll();
 }
 
+/* short on-screen message, drawn into the (4x4 tiled) game texture */
+static char osd_text[40];
+static int osd_frames;
+
+static void osd_show(const char *msg)
+{
+    strncpy(osd_text, msg, sizeof(osd_text) - 1);
+    osd_frames = 120;
+}
+
+static void osd_draw(void)
+{
+    if (osd_frames <= 0)
+        return;
+    osd_frames--;
+    int len = (int)strlen(osd_text);
+    for (int y = 6; y < 6 + 20; y++)
+        for (int x = 6; x < 6 + len * 8 + 6 && x < 256; x++) {
+            int gy = y - 8, gx = x - 9, on = 0;
+            if (gy >= 0 && gy < 16 && gx >= 0 && gx < len * 8)
+                on = console_font_8x16[(u8)osd_text[gx >> 3] * 16 + gy] & (0x80 >> (gx & 7));
+            game_tex[((y >> 2) * 64 + (x >> 2)) * 16 + (y & 3) * 4 + (x & 3)] = on ? 0xFFFF : 0x0000;
+        }
+    DCFlushRange(game_tex, 256 * 240 * 2);
+    GX_InvalidateTexAll();
+}
+
 static void draw_game(void)
 {
     tex_setup(&game_obj, game_tex, 256, 240, cfg.smooth);
@@ -378,6 +406,8 @@ static int gc_stick_dir(int x, int y)
 }
 
 static int menu_requested;
+static int hotkey;          /* 1 = quick save, 2 = quick load */
+static u32 prev_held[4];
 
 static u8 read_pad(int chan)
 {
@@ -393,8 +423,6 @@ static u8 read_pad(int chan)
         if (h & WPAD_CLASSIC_BUTTON_RIGHT) b |= NES_RIGHT;
         if (h & (WPAD_CLASSIC_BUTTON_A | WPAD_CLASSIC_BUTTON_X)) b |= NES_A;
         if (h & (WPAD_CLASSIC_BUTTON_B | WPAD_CLASSIC_BUTTON_Y)) b |= NES_B;
-        if (h & WPAD_CLASSIC_BUTTON_PLUS) b |= NES_START;
-        if (h & WPAD_CLASSIC_BUTTON_MINUS) b |= NES_SELECT;
         b |= (u8)stick_dir(wd->exp.classic.ljs.ang, wd->exp.classic.ljs.mag);
     } else if (exp == WPAD_EXP_NUNCHUK) {
         if (h & WPAD_BUTTON_UP) b |= NES_UP;
@@ -413,8 +441,20 @@ static u8 read_pad(int chan)
         if (h & WPAD_BUTTON_2) b |= NES_A;
         if (h & WPAD_BUTTON_1) b |= NES_B;
     }
-    if (h & WPAD_BUTTON_PLUS) b |= NES_START;
-    if (h & WPAD_BUTTON_MINUS) b |= NES_SELECT;
+    /* B + plus = save state, B + minus = load state (Wii Remote B trigger,
+     * or B on a Classic Controller). While B is held, plus/minus are hotkeys
+     * and do not reach the game. */
+    u32 pressed = h & ~prev_held[chan];
+    prev_held[chan] = h;
+    int b_held = (h & (WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B)) != 0;
+    if (b_held) {
+        if (pressed & (WPAD_BUTTON_PLUS | WPAD_CLASSIC_BUTTON_PLUS)) hotkey = 1;
+        if (pressed & (WPAD_BUTTON_MINUS | WPAD_CLASSIC_BUTTON_MINUS)) hotkey = 2;
+        b &= (u8)~(NES_START | NES_SELECT);
+    } else {
+        if (h & (WPAD_BUTTON_PLUS | WPAD_CLASSIC_BUTTON_PLUS)) b |= NES_START;
+        if (h & (WPAD_BUTTON_MINUS | WPAD_CLASSIC_BUTTON_MINUS)) b |= NES_SELECT;
+    }
     if (h & (WPAD_BUTTON_HOME | WPAD_CLASSIC_BUTTON_HOME))
         menu_requested = 1;
 
@@ -711,6 +751,30 @@ static u32 frame_us_avg;
 
 enum { M_RESUME, M_SAVE, M_LOAD, M_RESET, M_REGION, M_RUNAHEAD, M_SMOOTH, M_CROP, M_STRETCH, M_ROMS, M_EXIT, M_COUNT };
 
+static int save_state_file(void)
+{
+    char p[512];
+    size_t sz = nes_state_size(nes);
+    void *buf = malloc(sz);
+    if (!buf) return 0;
+    nes_save_state(nes, buf, sz);
+    make_path(p, sizeof p, ".st0");
+    int ok = write_file(p, buf, sz);
+    free(buf);
+    return ok;
+}
+
+static int load_state_file(void)
+{
+    char p[512];
+    size_t sz;
+    make_path(p, sizeof p, ".st0");
+    void *buf = read_file(p, &sz);
+    int ok = buf && nes_load_state(nes, buf, sz) == NES_OK;
+    free(buf);
+    return ok;
+}
+
 /* returns 0 resume, 1 back to ROM list, 2 quit, 3 restart (region changed) */
 static int game_menu(void)
 {
@@ -725,28 +789,16 @@ static int game_menu(void)
         if (k & (K_BACK | K_MENU)) return 0;
         int toggle = (k & (K_OK | K_LEFT | K_RIGHT)) != 0;
         if (toggle) {
-            char p[512];
             switch (sel) {
             case M_RESUME: return 0;
-            case M_SAVE: {
-                size_t sz = nes_state_size(nes);
-                void *buf = malloc(sz);
-                nes_save_state(nes, buf, sz);
-                make_path(p, sizeof p, ".st0");
-                strcpy(status, write_file(p, buf, sz) ? "State saved." : "Could not write state!");
-                free(buf);
-            } break;
-            case M_LOAD: {
-                size_t sz;
-                make_path(p, sizeof p, ".st0");
-                void *buf = read_file(p, &sz);
-                if (buf && nes_load_state(nes, buf, sz) == NES_OK) {
-                    free(buf);
+            case M_SAVE:
+                strcpy(status, save_state_file() ? "State saved." : "Could not write state!");
+                break;
+            case M_LOAD:
+                if (load_state_file())
                     return 0;
-                }
-                free(buf);
                 strcpy(status, "No valid savestate.");
-            } break;
+                break;
             case M_RESET: nes_reset(nes); return 0;
             case M_RUNAHEAD: cfg.runahead = (cfg.runahead + ((k & K_LEFT) ? 2 : 1)) % 3; save_config(); break;
             case M_SMOOTH: cfg.smooth ^= 1; save_config(); break;
@@ -875,7 +927,16 @@ static int run_game(void)
         u64 t0 = gettime();
         nes_run_frame_runahead(nes, cfg.runahead);
         audio_push(nes);
+        if (hotkey) {
+            int h = hotkey;
+            hotkey = 0;
+            if (h == 1)
+                osd_show(save_state_file() ? "State saved" : "Save failed");
+            else
+                osd_show(load_state_file() ? "State loaded" : "No state saved yet");
+        }
         upload_game(nes_framebuffer(nes));
+        osd_draw();
         u32 us = ticks_to_microsecs(gettime() - t0);
         frame_us_avg = (frame_us_avg * 15 + us) / 16;
         /* if run-ahead doesn't fit in a frame on this console, back off */
