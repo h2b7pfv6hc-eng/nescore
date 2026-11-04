@@ -102,6 +102,9 @@ savestate).
 
 Snel opslaan: houd B ingedrukt en druk op +. Snel laden: houd B ingedrukt en druk op −.
 
+De menu's bedien je door met de Wii Remote naar het scherm te wijzen en op A te
+drukken (sensorbalk nodig), of met de D-pad.
+
 In het menu: savestate opslaan/laden, reset, kleurenpalet (eigen signaalmodel of
 op echte hardware gemeten paletten van FirebrandX), run-ahead (uit/1/2 frames),
 scherpe of zachte schaling, overscan verbergen, beeldverhouding (8:7

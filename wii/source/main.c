@@ -266,38 +266,150 @@ static void draw_game(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* menu drawing (8x16 console font into a 512x480 texture)              */
+/* menu drawing: a 512x480 RGB565 canvas, shown full screen              */
 
-#define C_BG     0x0841
-#define C_TEXT   0xDEFB
-#define C_DIM    0x8410
-#define C_HI     0xFFE0
-#define C_BAR    0x2945
-#define C_ACCENT 0xF9A6
+#define RGB(r, g, b) (u16)((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3))
+#define C_TEXT    RGB(52, 58, 68)
+#define C_DIM     RGB(122, 130, 142)
+#define C_LINE    RGB(200, 207, 216)
+#define C_CARD    RGB(255, 255, 255)
+#define C_HOVER   RGB(232, 246, 253)
+#define C_BLUE    RGB(40, 172, 232)
+#define C_BLUE_DK RGB(18, 120, 178)
+#define C_FOLDER  RGB(240, 190, 70)
+#define C_CART    RGB(150, 156, 166)
+#define C_OK      RGB(46, 160, 90)
 
 static void m_clear(void)
 {
-    for (int i = 0; i < MENU_W * MENU_H; i++)
-        menu_lin[i] = C_BG;
+    /* soft vertical gradient */
+    for (int y = 0; y < MENU_H; y++) {
+        int t = y * 255 / MENU_H;
+        u16 c = RGB(244 - t * 22 / 255, 246 - t * 20 / 255, 249 - t * 16 / 255);
+        u16 *row = &menu_lin[y * MENU_W];
+        for (int x = 0; x < MENU_W; x++)
+            row[x] = c;
+    }
 }
 
 static void m_rect(int x, int y, int w, int h, u16 c)
 {
-    for (int j = y; j < y + h && j < MENU_H; j++)
-        for (int i = x; i < x + w && i < MENU_W; i++)
+    for (int j = y < 0 ? 0 : y; j < y + h && j < MENU_H; j++)
+        for (int i = x < 0 ? 0 : x; i < x + w && i < MENU_W; i++)
             menu_lin[j * MENU_W + i] = c;
 }
 
-static void m_text(int col, int row, const char *s, u16 color)
+/* filled rectangle with rounded corners */
+static void m_round(int x, int y, int w, int h, int r, u16 c)
 {
-    int x0 = 16 + col * 8, y0 = 16 + row * 16;
-    for (; *s && x0 + 8 <= MENU_W - 8; s++, x0 += 8) {
+    for (int j = 0; j < h; j++) {
+        int yy = y + j;
+        if (yy < 0 || yy >= MENU_H) continue;
+        int inset = 0;
+        int dy = j < r ? r - j : (j >= h - r ? j - (h - r - 1) : 0);
+        if (dy) {
+            while (inset < r && (r - inset) * (r - inset) + dy * dy > r * r + r)
+                inset++;
+        }
+        for (int i = x + inset; i < x + w - inset; i++)
+            if (i >= 0 && i < MENU_W)
+                menu_lin[yy * MENU_W + i] = c;
+    }
+}
+
+/* rounded box with a border */
+static void m_box(int x, int y, int w, int h, int r, int border, u16 bc, u16 fill)
+{
+    m_round(x, y, w, h, r, bc);
+    m_round(x + border, y + border, w - 2 * border, h - 2 * border, r > border ? r - border : 1, fill);
+}
+
+/* text at pixel position, scale 1 or 2 */
+static void m_textp(int x0, int y0, const char *s, u16 color, int scale)
+{
+    for (; *s; s++, x0 += 8 * scale) {
+        if (x0 + 8 * scale > MENU_W) break;
         const u8 *g = &console_font_8x16[(u8)*s * 16];
         for (int y = 0; y < 16; y++)
             for (int x = 0; x < 8; x++)
                 if (g[y] & (0x80 >> x))
-                    menu_lin[(y0 + y) * MENU_W + x0 + x] = color;
+                    m_rect(x0 + x * scale, y0 + y * scale, scale, scale, color);
     }
+}
+
+/* text clipped to max_px wide, with "..." when it does not fit */
+static void m_textfit(int x, int y, const char *s, u16 color, int max_px)
+{
+    char buf[96];
+    int max = max_px / 8;
+    if (max > 95) max = 95;
+    int len = (int)strlen(s);
+    if (len <= max) {
+        m_textp(x, y, s, color, 1);
+        return;
+    }
+    if (max < 4) return;
+    memcpy(buf, s, (size_t)(max - 3));
+    strcpy(buf + max - 3, "...");
+    m_textp(x, y, buf, color, 1);
+}
+
+static void m_text_center(int cx, int y, const char *s, u16 color, int scale)
+{
+    m_textp(cx - (int)strlen(s) * 4 * scale, y, s, color, scale);
+}
+
+static void m_tri(int cx, int cy, int size, int up, u16 c)
+{
+    for (int j = 0; j < size; j++) {
+        int half = up ? j : size - 1 - j;
+        m_rect(cx - half, cy - size / 2 + j, 2 * half + 1, 1, c);
+    }
+}
+
+static void m_arrow_lr(int cx, int cy, int size, int right, u16 c)
+{
+    for (int i = 0; i < size; i++) {
+        int half = right ? size - 1 - i : i;
+        m_rect(cx - size / 2 + i, cy - half, 1, 2 * half + 1, c);
+    }
+}
+
+static void m_icon_folder(int x, int y)
+{
+    m_round(x, y + 2, 8, 4, 1, C_FOLDER);
+    m_round(x, y + 4, 18, 12, 2, C_FOLDER);
+}
+
+static void m_icon_cart(int x, int y)
+{
+    m_round(x + 1, y, 16, 16, 2, C_CART);
+    m_rect(x + 4, y + 3, 10, 6, RGB(210, 214, 220));
+    for (int i = 0; i < 4; i++)
+        m_rect(x + 3 + i * 3, y + 13, 2, 3, RGB(110, 116, 126));
+}
+
+/* Pointer: an arrow with a white outline. Rows of the shape, '#' = outline,
+ * '.' = fill. */
+static void m_cursor(int px, int py)
+{
+    static const char *shape[] = {
+        "#",          "##",         "#.#",        "#..#",       "#...#",
+        "#....#",     "#.....#",    "#......#",   "#.......#",  "#........#",
+        "#.........#", "#......####", "#...#..#",   "#..##..#",   "#.#  #..#",
+        "##   #..#",  "#     #..#", "      #..#", "       ##",  NULL};
+    for (int j = 0; shape[j]; j++)
+        for (int i = 0; shape[j][i]; i++) {
+            char ch = shape[j][i];
+            if (ch == '#')
+                m_rect(px + i - 1, py + j - 1, 3, 3, C_CARD);
+        }
+    for (int j = 0; shape[j]; j++)
+        for (int i = 0; shape[j][i]; i++) {
+            char ch = shape[j][i];
+            if (ch == '#') m_rect(px + i, py + j, 1, 1, C_BLUE_DK);
+            else if (ch == '.') m_rect(px + i, py + j, 1, 1, C_BLUE);
+        }
 }
 
 static void m_show(void)
@@ -387,7 +499,8 @@ static void audio_push(nes_t *n)
 /* ------------------------------------------------------------------ */
 /* input                                                               */
 
-enum { K_UP = 1, K_DOWN = 2, K_LEFT = 4, K_RIGHT = 8, K_OK = 16, K_BACK = 32, K_MENU = 64 };
+enum { K_UP = 1, K_DOWN = 2, K_LEFT = 4, K_RIGHT = 8, K_OK = 16, K_BACK = 32, K_MENU = 64,
+       K_PLUS = 128, K_MINUS = 256 };
 
 static int stick_dir(float ang, float mag)
 {
@@ -507,6 +620,8 @@ static int menu_keys(void)
             if (h & (WPAD_BUTTON_B | WPAD_CLASSIC_BUTTON_B)) k |= K_BACK;
         }
         if (h & (WPAD_BUTTON_HOME | WPAD_CLASSIC_BUTTON_HOME)) k |= K_MENU;
+        if (h & (WPAD_BUTTON_PLUS | WPAD_CLASSIC_BUTTON_PLUS)) k |= K_PLUS;
+        if (h & (WPAD_BUTTON_MINUS | WPAD_CLASSIC_BUTTON_MINUS)) k |= K_MINUS;
         u16 g = PAD_ButtonsHeld(c);
         int sy = PAD_StickY(c);
         if ((g & PAD_BUTTON_UP) || sy > 50) k |= K_UP;
@@ -520,12 +635,130 @@ static int menu_keys(void)
     int pressed = k & ~held_prev;
     if (k && k == held_prev) {
         if (++repeat > 18 && (repeat & 3) == 0)
-            pressed = k & (K_UP | K_DOWN | K_LEFT | K_RIGHT);
+            pressed = k & (K_UP | K_DOWN | K_LEFT | K_RIGHT | K_PLUS | K_MINUS);
     } else {
         repeat = 0;
     }
     held_prev = k;
     return pressed;
+}
+
+/* Wii Remote pointer, in menu canvas coordinates */
+static int ptr_valid, ptr_x, ptr_y, ptr_chan, ptr_active;
+static int rumble_frames, rumble_chan;
+
+static void read_pointer(void)
+{
+    static int last_x = -100, last_y = -100;
+    ptr_valid = 0;
+    for (int c = 0; c < 4; c++) {
+        WPADData *wd = WPAD_Data(c);
+        if (!wd || wd->err != WPAD_ERR_NONE || !wd->ir.valid)
+            continue;
+        /* IR is reported in a 640x480 virtual screen; the canvas is drawn
+         * over w x 480 units, centred, on a scr_w x scr_h screen */
+        float sx = wd->ir.x * scr_w / 640.f, sy = wd->ir.y * scr_h / 480.f;
+        float w = widescreen ? scr_w * 0.75f : scr_w;
+        float x0 = (scr_w - w) / 2.f, y0 = (scr_h - 480.f) / 2.f;
+        ptr_x = (int)((sx - x0) * MENU_W / w);
+        ptr_y = (int)(sy - y0);
+        ptr_valid = ptr_x >= 0 && ptr_x < MENU_W && ptr_y >= 0 && ptr_y < MENU_H;
+        ptr_chan = c;
+        break;
+    }
+    if (ptr_valid && (abs(ptr_x - last_x) > 3 || abs(ptr_y - last_y) > 3)) {
+        ptr_active = 1; /* the pointer moved: it drives the focus again */
+        last_x = ptr_x;
+        last_y = ptr_y;
+    }
+    if (!ptr_valid)
+        ptr_active = 0;
+}
+
+static void rumble_tick(void)
+{
+    if (rumble_frames > 0 && --rumble_frames == 0)
+        WPAD_Rumble(rumble_chan, 0);
+}
+
+static void rumble_tap(void)
+{
+    rumble_chan = ptr_chan;
+    rumble_frames = 3;
+    WPAD_Rumble(rumble_chan, 1);
+}
+
+static void rumble_off(void)
+{
+    rumble_frames = 0;
+    for (int c = 0; c < 4; c++)
+        WPAD_Rumble(c, 0);
+}
+
+/* clickable areas of the current screen */
+typedef struct { short x, y, w, h, id, kind; } hit_t; /* kind 1 = option with < > */
+#define MAX_HITS 32
+static hit_t hits[MAX_HITS];
+static int n_hits;
+
+static void hit_add(int x, int y, int w, int h, int id, int kind)
+{
+    if (n_hits < MAX_HITS)
+        hits[n_hits++] = (hit_t){(short)x, (short)y, (short)w, (short)h, (short)id, (short)kind};
+}
+
+static int hit_at(int x, int y)
+{
+    for (int i = 0; i < n_hits; i++)
+        if (x >= hits[i].x && x < hits[i].x + hits[i].w && y >= hits[i].y && y < hits[i].y + hits[i].h)
+            return i;
+    return -1;
+}
+
+/*
+ * Shared input step for menus. *focus is an index into hits[]; it follows
+ * the pointer when the pointer moves, and the D-pad otherwise.
+ * Returns the pressed keys; *act is set to the hit index that A activates
+ * (or -1), and *dir to -1/+1 when an option is changed with left/right or
+ * by clicking its arrows.
+ */
+static int ui_step(int *focus, int *act, int *dir)
+{
+    int k = menu_keys();
+    read_pointer();
+    rumble_tick();
+    *act = -1;
+    *dir = 0;
+    if (ptr_active) {
+        int h = hit_at(ptr_x, ptr_y);
+        if (h >= 0 && h != *focus)
+            rumble_tap();
+        *focus = h;
+    }
+    if (k & (K_UP | K_DOWN)) {
+        ptr_active = 0;
+        if (*focus < 0) *focus = 0;
+        else if (k & K_UP) *focus = (*focus + n_hits - 1) % n_hits;
+        else *focus = (*focus + 1) % n_hits;
+    }
+    if (*focus >= n_hits)
+        *focus = n_hits - 1;
+    if (*focus >= 0 && hits[*focus].kind == 1) {
+        if (k & K_LEFT) *dir = -1;
+        if (k & K_RIGHT) *dir = 1;
+    }
+    if ((k & K_OK) && *focus >= 0) {
+        hit_t *h = &hits[*focus];
+        *act = *focus;
+        if (h->kind == 1) {
+            *dir = 1;
+            if (ptr_active && ptr_x < h->x + 34)
+                *dir = -1;
+        }
+    }
+    if (*dir && *act < 0)
+        *act = *focus;
+    return k;
 }
 
 /* ------------------------------------------------------------------ */
@@ -622,16 +855,44 @@ static void save_config(void)
     fclose(f);
 }
 
+static void header(const char *subtitle)
+{
+    m_rect(0, 0, MENU_W, 56, C_CARD);
+    m_rect(0, 56, MENU_W, 2, C_LINE);
+    m_textp(20, 12, "nescore", C_TEXT, 2);
+    m_rect(20, 46, 112, 3, C_BLUE);
+    if (subtitle)
+        m_textfit(150, 22, subtitle, C_DIM, MENU_W - 150 - 120);
+}
+
+static void button(hit_t *h, const char *label, int focused, int primary)
+{
+    u16 fill = primary ? (focused ? C_BLUE_DK : C_BLUE) : (focused ? C_HOVER : C_CARD);
+    u16 border = focused ? C_BLUE : C_LINE;
+    m_box(h->x, h->y, h->w, h->h, 8, focused ? 3 : 1, border, fill);
+    m_text_center(h->x + h->w / 2, h->y + h->h / 2 - 8, label, primary ? C_CARD : C_TEXT, 1);
+}
+
 static void message(const char *title, const char *msg)
 {
-    for (int i = 0; i < 150; i++) {
+    int focus = 0, act, dir;
+    while (menu_keys()) {}
+    while (!quit_requested) {
+        n_hits = 0;
+        hit_add(196, 300, 120, 40, 0, 0);
+        int k = ui_step(&focus, &act, &dir);
+        if (act == 0 || (k & K_BACK)) break;
         m_clear();
-        m_text(1, 1, title, C_HI);
-        m_text(1, 3, msg, C_TEXT);
-        m_text(1, 26, "Press A", C_DIM);
+        header(NULL);
+        m_box(56, 150, 400, 210, 14, 1, C_LINE, C_CARD);
+        m_text_center(256, 180, title, C_TEXT, 1);
+        m_rect(76, 204, 360, 1, C_LINE);
+        m_text_center(256, 224, msg, C_DIM, 1);
+        button(&hits[0], "OK", focus == 0, 1);
+        if (ptr_valid) m_cursor(ptr_x, ptr_y);
         m_show();
-        if (menu_keys() & (K_OK | K_BACK)) break;
     }
+    rumble_off();
 }
 
 /* ------------------------------------------------------------------ */
@@ -683,71 +944,134 @@ static void scan_dir(const char *path)
 }
 
 /* returns 1 when a ROM was chosen, 0 to quit */
+enum { B_BACK = 1, B_UP, B_DOWN, B_EXIT, B_ROW = 100 };
+
+static void draw_browser(const char *cur, int top, int rows, int n_rows, int focus)
+{
+    m_clear();
+    header("Choose a game");
+    for (int i = 0; i < n_hits; i++) {
+        hit_t *h = &hits[i];
+        int f = i == focus;
+        if (h->id >= B_ROW) {
+            entry_t *e = &entries[h->id - B_ROW];
+            m_box(h->x, h->y, h->w, h->h, 8, f ? 3 : 1, f ? C_BLUE : C_LINE, f ? C_HOVER : C_CARD);
+            if (e->is_dir) m_icon_folder(h->x + 12, h->y + 9);
+            else m_icon_cart(h->x + 12, h->y + 9);
+            char name[128];
+            strncpy(name, e->name, sizeof(name) - 1);
+            name[sizeof(name) - 1] = 0;
+            char *dot = e->is_dir ? NULL : strrchr(name, '.');
+            if (dot) *dot = 0;
+            m_textfit(h->x + 40, h->y + 9, name, C_TEXT, h->w - 52);
+        } else if (h->id == B_UP || h->id == B_DOWN) {
+            int can = h->id == B_UP ? top > 0 : top + rows < n_entries;
+            m_box(h->x, h->y, h->w, h->h, 8, f ? 3 : 1, f ? C_BLUE : C_LINE, f ? C_HOVER : C_CARD);
+            m_tri(h->x + h->w / 2, h->y + h->h / 2, 10, h->id == B_UP, can ? C_TEXT : C_LINE);
+        } else {
+            button(h, h->id == B_BACK ? "< Back" : "Exit", f, 0);
+        }
+    }
+    m_textfit(20, 64, cur, C_DIM, 470);
+    if (!n_entries) {
+        m_box(56, 160, 400, 120, 14, 1, C_LINE, C_CARD);
+        m_text_center(256, 190, "No .nes files here", C_TEXT, 1);
+        m_text_center(256, 220, "Put your games in sd:/nes or sd:/roms/nes", C_DIM, 1);
+    }
+    if (n_entries > rows) {
+        char pos[32];
+        snprintf(pos, sizeof pos, "%d-%d of %d", top + 1, top + n_rows, n_entries);
+        m_textp(496 - (int)strlen(pos) * 8, 438, pos, C_DIM, 1);
+    }
+    m_textp(20, 438, "Point + A: open   B: back   +/-: page", C_DIM, 1);
+}
+
 static int browse(void)
 {
     char cur[256];
     strcpy(cur, rom_dir);
     scan_dir(cur);
-    int sel = 0, top = 0;
-    const int rows = 22;
+    int top = 0, focus = -1, act, dir;
+    const int rows = 9, row_h = 34, row_gap = 4, list_y = 84;
+    while (menu_keys()) {}
     while (!quit_requested) {
-        int k = menu_keys();
-        if (k & K_UP) sel--;
-        if (k & K_DOWN) sel++;
-        if (k & K_LEFT) sel -= rows;
-        if (k & K_RIGHT) sel += rows;
-        if (sel < 0) sel = n_entries ? n_entries - 1 : 0;
-        if (sel >= n_entries) sel = 0;
-        if (k & K_BACK) {
+        int at_root = !(strrchr(cur, '/') && strchr(cur, '/') != strrchr(cur, '/'));
+        if (top > n_entries - rows) top = n_entries - rows;
+        if (top < 0) top = 0;
+
+        /* layout */
+        n_hits = 0;
+        for (int i = 0; i < rows && top + i < n_entries; i++)
+            hit_add(16, list_y + i * (row_h + row_gap), 436, row_h, B_ROW + top + i, 0);
+        int n_rows = n_hits;
+        if (n_entries > rows) {
+            hit_add(460, list_y, 36, 166, B_UP, 0);
+            hit_add(460, list_y + 172, 36, 166, B_DOWN, 0);
+        }
+        if (!at_root)
+            hit_add(388, 12, 104, 34, B_BACK, 0);
+        else
+            hit_add(388, 12, 104, 34, B_EXIT, 0);
+
+        int old_top = top, old_focus = focus;
+        int k = ui_step(&focus, &act, &dir);
+        int id = act >= 0 ? hits[act].id : 0;
+        /* The D-pad walks through the games only (the pointer reaches the
+         * buttons too) and scrolls the list when it reaches an edge. */
+        if (!ptr_active && (k & (K_UP | K_DOWN)) && n_entries) {
+            int sel = (old_focus >= 0 && old_focus < n_rows) ? top + old_focus : top - ((k & K_DOWN) ? 1 : 0);
+            sel += (k & K_DOWN) ? 1 : -1;
+            if (sel < 0) sel = n_entries - 1;
+            if (sel >= n_entries) sel = 0;
+            if (sel < top) top = sel;
+            if (sel >= top + rows) top = sel - rows + 1;
+            focus = sel - top;
+        }
+        if (k & K_PLUS) top += rows;
+        if (k & K_MINUS) top -= rows;
+        if (k & K_BACK) id = at_root ? 0 : B_BACK;
+        if (k & K_MENU) return 0;
+
+        if (id == B_EXIT) { rumble_off(); return 0; }
+        if (id == B_UP) top -= rows - 1;
+        if (id == B_DOWN) top += rows - 1;
+        if (id == B_BACK) {
             char *slash = strrchr(cur, '/');
             if (slash && strchr(cur, '/') != slash) {
                 *slash = 0;
                 scan_dir(cur);
-                sel = top = 0;
+                top = 0;
+                focus = -1;
             }
         }
-        if ((k & K_OK) && n_entries) {
-            entry_t *e = &entries[sel];
+        if (id >= B_ROW && id - B_ROW < n_entries) {
+            entry_t *e = &entries[id - B_ROW];
             char full[512];
             snprintf(full, sizeof full, "%s/%s", cur, e->name);
             if (e->is_dir) {
                 strncpy(cur, full, sizeof(cur) - 1);
                 scan_dir(cur);
-                sel = top = 0;
+                top = 0;
+                focus = -1;
             } else {
                 strncpy(rom_path, full, sizeof(rom_path) - 1);
                 strncpy(rom_name, e->name, sizeof(rom_name) - 1);
                 strncpy(rom_dir, cur, sizeof(rom_dir) - 1);
+                rumble_off();
                 return 1;
             }
         }
-        if (k & K_MENU) return 0;
-        if (sel < top) top = sel;
-        if (sel >= top + rows) top = sel - rows + 1;
+        if (top > n_entries - rows) top = n_entries - rows;
+        if (top < 0) top = 0;
+        if (top != old_top) continue; /* relayout before drawing */
 
-        m_clear();
-        m_rect(0, 0, MENU_W, 44, C_BAR);
-        m_text(1, 0, "nescore", C_ACCENT);
-        m_text(10, 0, "cycle-accurate NES for Wii", C_DIM);
-        m_text(1, 1, cur, C_TEXT);
-        if (!n_entries) {
-            m_text(1, 4, "No .nes files here.", C_TEXT);
-            m_text(1, 6, "Put your ROMs in sd:/nes/ or usb:/nes/", C_DIM);
-        }
-        for (int i = 0; i < rows && top + i < n_entries; i++) {
-            entry_t *e = &entries[top + i];
-            char line[64];
-            snprintf(line, sizeof line, "%s%.56s", e->is_dir ? "/" : " ", e->name);
-            if (top + i == sel) {
-                m_rect(8, 16 + (3 + i) * 16, MENU_W - 16, 16, C_BAR);
-                m_text(1, 3 + i, line, C_HI);
-            } else {
-                m_text(1, 3 + i, line, e->is_dir ? C_ACCENT : C_TEXT);
-            }
-        }
-        m_text(1, 27, "A: open   B: up   HOME: exit to loader", C_DIM);
+        draw_browser(cur, top, rows, n_rows, focus);
+        if (ptr_valid) m_cursor(ptr_x, ptr_y);
+        m_show();
+        if (ptr_valid) m_cursor(ptr_x, ptr_y);
         m_show();
     }
+    rumble_off();
     return 0;
 }
 
@@ -782,87 +1106,129 @@ static int load_state_file(void)
     return ok;
 }
 
+/* small picture of the paused game, drawn into the canvas */
+static void m_thumbnail(int x0, int y0)
+{
+    const uint16_t *fb = nes_framebuffer(nes);
+    m_round(x0 - 4, y0 - 4, 136, 128, 6, C_LINE);
+    for (int y = 0; y < 120; y++)
+        for (int x = 0; x < 128; x++)
+            menu_lin[(y0 + y) * MENU_W + x0 + x] = pal565[fb[(y * 2) * 256 + x * 2] & 511];
+}
+
+static void draw_game_menu(int focus, const char *status, int status_ok)
+{
+    static const char *ra_names[3] = {"off", "1 frame", "2 frames"};
+    static const char *region_names[3] = {"auto", "NTSC (60 Hz)", "PAL (50 Hz)"};
+    static const char *aspect_names[3] = {"8:7 like a NES", "stretch 4:3", "sharp 2x pixels"};
+    char title[128];
+    strncpy(title, rom_name, sizeof(title) - 1);
+    title[sizeof(title) - 1] = 0;
+    char *dot = strrchr(title, '.');
+    if (dot) *dot = 0;
+    m_clear();
+    header(title);
+    m_thumbnail(52, 72);
+    for (int i = 0; i < n_hits; i++) {
+        hit_t *h = &hits[i];
+        int f = i == focus;
+        static const char *labels[M_COUNT] = {
+            [M_RESUME] = "Resume", [M_SAVE] = "Save state", [M_LOAD] = "Load state",
+            [M_RESET] = "Reset", [M_ROMS] = "Other game", [M_EXIT] = "Exit to loader"};
+        if (h->kind == 0) {
+            button(h, labels[h->id], f, h->id == M_RESUME);
+            continue;
+        }
+        const char *name = "", *value = "";
+        char vbuf[48];
+        switch (h->id) {
+        case M_REGION:
+            name = "Region";
+            snprintf(vbuf, sizeof vbuf, "%s (%s)", region_names[cfg.region], nes_is_pal(nes) ? "PAL" : "NTSC");
+            value = vbuf;
+            break;
+        case M_PALETTE: name = "Colours"; value = nes_palette_name(cfg.palette); break;
+        case M_RUNAHEAD: name = "Run-ahead (input lag)"; value = ra_names[cfg.runahead]; break;
+        case M_SMOOTH: name = "Smooth scaling"; value = cfg.smooth ? "on" : "off"; break;
+        case M_CROP: name = "Hide overscan"; value = cfg.crop ? "on" : "off"; break;
+        case M_STRETCH: name = "Picture"; value = aspect_names[cfg.stretch]; break;
+        }
+        m_box(h->x, h->y, h->w, h->h, 8, f ? 3 : 1, f ? C_BLUE : C_LINE, f ? C_HOVER : C_CARD);
+        m_arrow_lr(h->x + 16, h->y + h->h / 2, 8, 0, f ? C_BLUE : C_DIM);
+        m_arrow_lr(h->x + h->w - 16, h->y + h->h / 2, 8, 1, f ? C_BLUE : C_DIM);
+        m_textfit(h->x + 34, h->y + 5, name, C_DIM, h->w - 68);
+        m_textfit(h->x + 34, h->y + 22, value, C_TEXT, h->w - 68);
+    }
+    char info[80];
+    snprintf(info, sizeof info, "Mapper %d   CPU load %u%%", nes_mapper_number(nes),
+             (unsigned)(frame_us_avg * 100 / 16683));
+    m_textp(232, 378, info, C_DIM, 1);
+    if (status[0]) {
+        m_round(232, 400, 264, 26, 6, status_ok ? C_OK : RGB(210, 80, 60));
+        m_text_center(364, 405, status, C_CARD, 1);
+    }
+    m_textp(20, 446, "Point + A: select   B / HOME: back to game", C_DIM, 1);
+}
+
 /* returns 0 resume, 1 back to ROM list, 2 quit, 3 restart (region changed) */
 static int game_menu(void)
 {
-    static const char *ra_names[3] = {"off", "1 frame", "2 frames"};
-    int sel = 0;
-    char status[80] = "";
-    while (menu_keys()) {} /* wait for release */
+    int focus = 0, act, dir;
+    char status[64] = "";
+    int status_ok = 1;
+    while (menu_keys()) {}
     while (!quit_requested) {
-        int k = menu_keys();
-        if (k & K_UP) sel = (sel + M_COUNT - 1) % M_COUNT;
-        if (k & K_DOWN) sel = (sel + 1) % M_COUNT;
-        if (k & (K_BACK | K_MENU)) return 0;
-        int toggle = (k & (K_OK | K_LEFT | K_RIGHT)) != 0;
-        if (toggle) {
-            switch (sel) {
-            case M_RESUME: return 0;
+        /* layout: actions on the left, settings on the right */
+        n_hits = 0;
+        static const int left_ids[6] = {M_RESUME, M_SAVE, M_LOAD, M_RESET, M_ROMS, M_EXIT};
+        for (int i = 0; i < 6; i++)
+            hit_add(16, 200 + i * 38, 200, 32, left_ids[i], 0);
+        static const int right_ids[6] = {M_REGION, M_PALETTE, M_RUNAHEAD, M_SMOOTH, M_CROP, M_STRETCH};
+        for (int i = 0; i < 6; i++)
+            hit_add(232, 70 + i * 50, 264, 44, right_ids[i], 1);
+
+        int k = ui_step(&focus, &act, &dir);
+        if (k & (K_BACK | K_MENU)) { rumble_off(); return 0; }
+        if (act >= 0) {
+            int id = hits[act].id, d = dir ? dir : 1;
+            switch (id) {
+            case M_RESUME: rumble_off(); return 0;
             case M_SAVE:
-                strcpy(status, save_state_file() ? "State saved." : "Could not write state!");
+                status_ok = save_state_file();
+                strcpy(status, status_ok ? "State saved" : "Could not write the state");
                 break;
             case M_LOAD:
-                if (load_state_file())
-                    return 0;
-                strcpy(status, "No valid savestate.");
+                if (load_state_file()) { rumble_off(); return 0; }
+                status_ok = 0;
+                strcpy(status, "No state saved yet");
                 break;
-            case M_RESET: nes_reset(nes); return 0;
-            case M_RUNAHEAD: cfg.runahead = (cfg.runahead + ((k & K_LEFT) ? 2 : 1)) % 3; save_config(); break;
+            case M_RESET: nes_reset(nes); rumble_off(); return 0;
+            case M_ROMS: rumble_off(); return 1;
+            case M_EXIT: rumble_off(); return 2;
+            case M_RUNAHEAD: cfg.runahead = (cfg.runahead + 3 + d) % 3; save_config(); break;
             case M_SMOOTH: cfg.smooth ^= 1; save_config(); break;
             case M_CROP: cfg.crop ^= 1; save_config(); break;
-            case M_STRETCH: cfg.stretch = (cfg.stretch + ((k & K_LEFT) ? 2 : 1)) % 3; save_config(); break;
+            case M_STRETCH: cfg.stretch = (cfg.stretch + 3 + d) % 3; save_config(); break;
             case M_PALETTE:
-                cfg.palette = (cfg.palette + ((k & K_LEFT) ? NES_PALETTE_COUNT - 1 : 1)) % NES_PALETTE_COUNT;
+                cfg.palette = (cfg.palette + NES_PALETTE_COUNT + d) % NES_PALETTE_COUNT;
                 build_palette();
                 save_config();
                 break;
             case M_REGION:
-                cfg.region = (cfg.region + ((k & K_LEFT) ? 2 : 1)) % 3;
+                cfg.region = (cfg.region + 3 + d) % 3;
                 save_config();
+                rumble_off();
                 return 3; /* restart the game with the new timing */
-            case M_ROMS: return 1;
-            case M_EXIT: return 2;
             }
         }
-        char items[M_COUNT][64];
-        snprintf(items[M_RESUME], 64, "Resume");
-        snprintf(items[M_SAVE], 64, "Save state");
-        snprintf(items[M_LOAD], 64, "Load state");
-        snprintf(items[M_RESET], 64, "Reset console");
-        static const char *region_names[3] = {"auto", "NTSC (60 Hz)", "PAL (50 Hz)"};
-        snprintf(items[M_REGION], 64, "Region: %s, now %s", region_names[cfg.region],
-                 nes_is_pal(nes) ? "PAL" : "NTSC");
-        snprintf(items[M_PALETTE], 64, "Colours: %s", nes_palette_name(cfg.palette));
-        snprintf(items[M_RUNAHEAD], 64, "Run-ahead (less input lag): %s", ra_names[cfg.runahead]);
-        snprintf(items[M_SMOOTH], 64, "Smooth scaling: %s", cfg.smooth ? "on" : "off");
-        snprintf(items[M_CROP], 64, "Hide overscan: %s", cfg.crop ? "on" : "off");
-        static const char *aspect_names[3] = {"8:7 like a real NES", "stretch 4:3", "sharp (exact 2x pixels)"};
-        snprintf(items[M_STRETCH], 64, "Picture: %s", aspect_names[cfg.stretch]);
-        snprintf(items[M_ROMS], 64, "Choose another game");
-        snprintf(items[M_EXIT], 64, "Exit to loader");
 
-        m_clear();
-        m_rect(0, 0, MENU_W, 44, C_BAR);
-        m_text(1, 0, "nescore", C_ACCENT);
-        m_text(1, 1, rom_name, C_TEXT);
-        /* one row per item, with a small gap after each group */
-        static const int row[M_COUNT] = {3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 16, 17};
-        for (int i = 0; i < M_COUNT; i++) {
-            if (i == sel) {
-                m_rect(8, 16 + row[i] * 16, MENU_W - 16, 16, C_BAR);
-                m_text(2, row[i], items[i], C_HI);
-            } else {
-                m_text(2, row[i], items[i], C_TEXT);
-            }
-        }
-        char perf[96];
-        snprintf(perf, sizeof perf, "Mapper %d   CPU load: %u%% of a frame",
-                 nes_mapper_number(nes), (unsigned)(frame_us_avg * 100 / 16683));
-        m_text(1, 25, perf, C_DIM);
-        m_text(1, 26, status, C_HI);
-        m_text(1, 27, "A: select   B/HOME: back to game", C_DIM);
+        draw_game_menu(focus, status, status_ok);
+        if (ptr_valid) m_cursor(ptr_x, ptr_y);
+        m_show();
+        if (ptr_valid) m_cursor(ptr_x, ptr_y);
         m_show();
     }
+    rumble_off();
     return 2;
 }
 
@@ -975,6 +1341,7 @@ int main(int argc, char **argv)
     WPAD_Init();
     PAD_Init();
     WPAD_SetDataFormat(WPAD_CHAN_ALL, WPAD_FMT_BTNS_ACC_IR);
+    WPAD_SetVRes(WPAD_CHAN_ALL, 640, 480);
     SYS_SetPowerCallback(power_cb);
     SYS_SetResetCallback(reset_cb);
     WPAD_SetPowerButtonCallback(wpad_power_cb);
