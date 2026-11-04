@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   wii:
     runs-on: ubuntu-latest
@@ -16,3 +19,20 @@ jobs:
         with:
           name: nescore-wii
           path: wii/dist/
+      - name: Pack for the SD card
+        run: |
+          command -v zip || (apt-get update -qq && apt-get install -y -qq zip)
+          cd wii/dist && zip -r ../../nescore-wii.zip apps
+      # Always the newest version at one fixed link:
+      # https://github.com/<owner>/nescore/releases/latest/download/nescore-wii.zip
+      - name: Publish as the latest download
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: nescore (newest version)
+          body: |
+            Newest build of nescore for the Wii. Unpack and copy the "apps" folder to your SD card.
+            Built from commit ${{ github.sha }}.
+          files: nescore-wii.zip
+          make_latest: true
